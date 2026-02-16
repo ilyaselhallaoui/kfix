@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kfix"
+version = "0.1.0"
+description = "AI-powered Kubernetes troubleshooter CLI"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "anthropic>=0.18.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+kfix = "kfix.cli:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]

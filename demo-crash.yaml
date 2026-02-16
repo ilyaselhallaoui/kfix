@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: crashy-app
+  labels:
+    app: demo
+spec:
+  containers:
+  - name: app
+    image: busybox
+    command: ["/bin/sh"]
+    args: ["-c", "echo 'Starting app...' && sleep 5 && exit 1"]
+    resources:
+      limits:
+        memory: "64Mi"
