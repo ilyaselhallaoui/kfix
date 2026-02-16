@@ -35,3 +35,10 @@ config.yaml
 
 # Claude Code
 .claude/
+
+# Private/Internal Documentation - Business Strategy
+GO-TO-MARKET.md
+kfix.md
+
+# Temporary/Duplicate Files
+Untitled
