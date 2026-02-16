@@ -8,12 +8,36 @@ version = "0.1.0"
 description = "AI-powered Kubernetes troubleshooter CLI"
 readme = "README.md"
 requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+keywords = ["kubernetes", "k8s", "troubleshooting", "ai", "cli", "devops"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Software Development :: Debuggers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
     "typer>=0.9.0",
     "rich>=13.0.0",
     "anthropic>=0.18.0",
     "pyyaml>=6.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/YOURUSERNAME/kfix"
+Repository = "https://github.com/YOURUSERNAME/kfix"
+Issues = "https://github.com/YOURUSERNAME/kfix/issues"
 
 [project.scripts]
 kfix = "kfix.cli:app"
