@@ -20,6 +20,7 @@ build/
 # Testing
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 *.log
 
@@ -45,6 +46,11 @@ config.yaml
 # Private/Internal Documentation - Business Strategy
 GO-TO-MARKET.md
 kfix.md
+
+# Ralph Wiggum Method (iteration logs)
+.ralph-logs/
+ralph.sh
+spec.md
 
 # Temporary/Duplicate Files
 Untitled

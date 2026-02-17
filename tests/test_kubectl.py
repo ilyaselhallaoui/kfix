@@ -1,5 +1,6 @@
 """Tests for kubectl module."""
 
+import json
 import subprocess
 from unittest.mock import Mock
 
@@ -19,7 +20,6 @@ class TestKubectl:
 
     def test_check_cluster_access_failure(self, mocker):
         """Test failed cluster access check."""
-        # Mock subprocess to raise an error
         mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("kubectl", 30))
 
         kubectl = Kubectl()
@@ -103,7 +103,6 @@ class TestKubectl:
         """Test gathering all pod diagnostics."""
         kubectl = Kubectl()
 
-        # Mock all methods
         mocker.patch.object(kubectl, "describe_pod", return_value="describe output")
         mocker.patch.object(kubectl, "get_pod_logs", return_value="logs output")
         mocker.patch.object(kubectl, "get_pod_events", return_value="events output")
@@ -120,7 +119,6 @@ class TestKubectl:
         """Test gathering all node diagnostics."""
         kubectl = Kubectl()
 
-        # Mock all methods
         mocker.patch.object(kubectl, "describe_node", return_value="describe output")
         mocker.patch.object(kubectl, "get_node_events", return_value="events output")
 
@@ -133,7 +131,6 @@ class TestKubectl:
         """Test gathering all deployment diagnostics."""
         kubectl = Kubectl()
 
-        # Mock all methods
         mocker.patch.object(kubectl, "describe_deployment", return_value="describe output")
         mocker.patch.object(kubectl, "get_deployment_events", return_value="events output")
 
@@ -146,7 +143,6 @@ class TestKubectl:
         """Test gathering all service diagnostics."""
         kubectl = Kubectl()
 
-        # Mock all methods
         mocker.patch.object(kubectl, "describe_service", return_value="describe output")
         mocker.patch.object(kubectl, "get_service_endpoints", return_value="endpoints output")
 
@@ -170,3 +166,202 @@ class TestKubectl:
 
         with pytest.raises(KubectlError, match="kubectl not found"):
             kubectl._run(["get", "pods"])
+
+
+class TestKubectlContext:
+    """Tests for --context support in Kubectl."""
+
+    def test_context_prepended_to_args(self, mocker):
+        """Test that --context is prepended to kubectl args."""
+        mock_result = Mock()
+        mock_result.stdout = "output"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run = mocker.patch("subprocess.run", return_value=mock_result)
+
+        kubectl = Kubectl(context="my-cluster")
+        kubectl._run(["get", "pods"], check=False)
+
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert args == ["kubectl", "--context", "my-cluster", "get", "pods"]
+
+    def test_no_context_no_extra_args(self, mocker):
+        """Test that no --context means no extra args."""
+        mock_result = Mock()
+        mock_result.stdout = "output"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        mock_run = mocker.patch("subprocess.run", return_value=mock_result)
+
+        kubectl = Kubectl()
+        kubectl._run(["get", "pods"], check=False)
+
+        args = mock_run.call_args[0][0]
+        assert args == ["kubectl", "get", "pods"]
+
+
+class TestScanNamespace:
+    """Tests for scan_namespace and scan_all_namespaces."""
+
+    def test_scan_namespace_unhealthy_pod(self, mocker):
+        """Test scanning namespace finds unhealthy pods."""
+        pods_json = json.dumps({
+            "items": [
+                {
+                    "metadata": {"name": "healthy-pod"},
+                    "status": {"phase": "Running"},
+                },
+                {
+                    "metadata": {"name": "broken-pod"},
+                    "status": {
+                        "phase": "Pending",
+                        "containerStatuses": [
+                            {"state": {"waiting": {"reason": "ImagePullBackOff"}}}
+                        ],
+                    },
+                },
+            ]
+        })
+        deployments_json = json.dumps({"items": []})
+        nodes_json = json.dumps({"items": []})
+
+        def mock_run(args, **kwargs):
+            mock_result = Mock()
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            cmd = " ".join(args)
+            if "get pods" in cmd or "get,pods" in cmd:
+                mock_result.stdout = pods_json
+            elif "get deployments" in cmd:
+                mock_result.stdout = deployments_json
+            elif "get nodes" in cmd:
+                mock_result.stdout = nodes_json
+            else:
+                mock_result.stdout = ""
+            return mock_result
+
+        mocker.patch("subprocess.run", side_effect=mock_run)
+
+        kubectl = Kubectl(use_cache=False)
+        results = kubectl.scan_namespace("default")
+
+        pod_results = [r for r in results if r["kind"] == "pod"]
+        assert len(pod_results) == 1
+        assert pod_results[0]["name"] == "broken-pod"
+        assert pod_results[0]["reason"] == "ImagePullBackOff"
+
+    def test_scan_namespace_unhealthy_deployment(self, mocker):
+        """Test scanning namespace finds unhealthy deployments."""
+        pods_json = json.dumps({"items": []})
+        deployments_json = json.dumps({
+            "items": [
+                {
+                    "metadata": {"name": "broken-deploy"},
+                    "spec": {"replicas": 3},
+                    "status": {"availableReplicas": 1},
+                },
+            ]
+        })
+        nodes_json = json.dumps({"items": []})
+
+        def mock_run(args, **kwargs):
+            mock_result = Mock()
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            cmd = " ".join(args)
+            if "get pods" in cmd:
+                mock_result.stdout = pods_json
+            elif "get deployments" in cmd:
+                mock_result.stdout = deployments_json
+            elif "get nodes" in cmd:
+                mock_result.stdout = nodes_json
+            else:
+                mock_result.stdout = ""
+            return mock_result
+
+        mocker.patch("subprocess.run", side_effect=mock_run)
+
+        kubectl = Kubectl(use_cache=False)
+        results = kubectl.scan_namespace("default")
+
+        deploy_results = [r for r in results if r["kind"] == "deployment"]
+        assert len(deploy_results) == 1
+        assert deploy_results[0]["name"] == "broken-deploy"
+        assert "1/3" in deploy_results[0]["status"]
+
+    def test_scan_namespace_all_healthy(self, mocker):
+        """Test scanning namespace with all healthy resources."""
+        pods_json = json.dumps({
+            "items": [
+                {"metadata": {"name": "good-pod"}, "status": {"phase": "Running"}},
+            ]
+        })
+        deployments_json = json.dumps({
+            "items": [
+                {
+                    "metadata": {"name": "good-deploy"},
+                    "spec": {"replicas": 2},
+                    "status": {"availableReplicas": 2},
+                },
+            ]
+        })
+        nodes_json = json.dumps({
+            "items": [
+                {
+                    "metadata": {"name": "good-node"},
+                    "status": {
+                        "conditions": [{"type": "Ready", "status": "True", "reason": "KubeletReady"}]
+                    },
+                },
+            ]
+        })
+
+        def mock_run(args, **kwargs):
+            mock_result = Mock()
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            cmd = " ".join(args)
+            if "get pods" in cmd:
+                mock_result.stdout = pods_json
+            elif "get deployments" in cmd:
+                mock_result.stdout = deployments_json
+            elif "get nodes" in cmd:
+                mock_result.stdout = nodes_json
+            else:
+                mock_result.stdout = ""
+            return mock_result
+
+        mocker.patch("subprocess.run", side_effect=mock_run)
+
+        kubectl = Kubectl(use_cache=False)
+        results = kubectl.scan_namespace("default")
+
+        assert len(results) == 0
+
+    def test_pod_failure_reason_waiting(self):
+        """Test extracting failure reason from waiting container."""
+        pod = {
+            "status": {
+                "containerStatuses": [
+                    {"state": {"waiting": {"reason": "CrashLoopBackOff"}}}
+                ]
+            }
+        }
+        assert Kubectl._pod_failure_reason(pod) == "CrashLoopBackOff"
+
+    def test_pod_failure_reason_terminated(self):
+        """Test extracting failure reason from terminated container."""
+        pod = {
+            "status": {
+                "containerStatuses": [
+                    {"state": {"terminated": {"reason": "OOMKilled"}}}
+                ]
+            }
+        }
+        assert Kubectl._pod_failure_reason(pod) == "OOMKilled"
+
+    def test_pod_failure_reason_unknown(self):
+        """Test extracting failure reason when status is unknown."""
+        pod = {"status": {}}
+        assert Kubectl._pod_failure_reason(pod) == "Unknown"

@@ -2,9 +2,10 @@
 
 import json
 import re
+import shlex
 import subprocess
 from datetime import datetime
-from typing import Iterator, NoReturn, Dict, Any, List
+from typing import Callable, Dict, Any, Iterator, List, Optional
 
 import typer
 from rich import print as rprint
@@ -13,6 +14,7 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm
+from rich.table import Table
 
 from kfix.ai import Diagnostician, TokenUsage
 from kfix.config import Config
@@ -75,17 +77,15 @@ def extract_kubectl_commands(diagnosis: str) -> List[str]:
     Returns:
         List of kubectl commands found in code blocks.
     """
-    commands = []
+    commands: List[str] = []
 
     # Match code blocks with kubectl commands
-    # Pattern: ```bash\nkubectl ... \n``` or just kubectl ... in backticks
     code_block_pattern = r"```(?:bash|sh)?\s*(kubectl[^\n]+(?:\n(?!```).*)*)\s*```"
     inline_pattern = r"`(kubectl[^`]+)`"
 
     # Find code blocks
     for match in re.finditer(code_block_pattern, diagnosis, re.MULTILINE | re.DOTALL):
         block = match.group(1).strip()
-        # Split by newlines and filter kubectl commands
         for line in block.split("\n"):
             line = line.strip()
             if line.startswith("kubectl") and not line.startswith("#"):
@@ -141,27 +141,26 @@ def apply_fixes(
         console.print(f"\n[cyan]Executing:[/cyan] {cmd}")
 
         try:
-            # Execute the command
             result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=60
+                shlex.split(cmd), capture_output=True, text=True, timeout=60
             )
 
             if result.returncode == 0:
-                console.print(f"[green]✓ Command {i} executed successfully[/green]")
+                console.print(f"[green]\u2713 Command {i} executed successfully[/green]")
                 if result.stdout.strip():
                     console.print(f"[dim]{result.stdout.strip()}[/dim]")
             else:
-                console.print(f"[red]✗ Command {i} failed[/red]")
+                console.print(f"[red]\u2717 Command {i} failed[/red]")
                 if result.stderr.strip():
                     console.print(f"[red]{result.stderr.strip()}[/red]")
 
         except subprocess.TimeoutExpired:
-            console.print(f"[red]✗ Command {i} timed out[/red]")
+            console.print(f"[red]\u2717 Command {i} timed out[/red]")
         except Exception as e:
-            console.print(f"[red]✗ Command {i} failed: {e}[/red]")
+            console.print(f"[red]\u2717 Command {i} failed: {e}[/red]")
 
 
-def display_token_usage(token_usage: TokenUsage | None, show_cost: bool = True) -> None:
+def display_token_usage(token_usage: Optional[TokenUsage], show_cost: bool = True) -> None:
     """Display token usage information.
 
     Args:
@@ -187,10 +186,10 @@ def display_token_usage(token_usage: TokenUsage | None, show_cost: bool = True) 
 def output_json(
     resource_type: str,
     resource_name: str,
-    namespace: str | None,
+    namespace: Optional[str],
     diagnosis: str,
-    diagnostics: Dict[str, str] | None = None,
-    token_usage: TokenUsage | None = None,
+    diagnostics: Optional[Dict[str, str]] = None,
+    token_usage: Optional[TokenUsage] = None,
 ) -> None:
     """Output diagnosis as JSON.
 
@@ -255,16 +254,105 @@ def get_diagnostician(model: str = "sonnet") -> Diagnostician:
         raise typer.Exit(1)
 
 
+def _diagnose_resource(
+    resource_type: str,
+    resource_name: str,
+    namespace: Optional[str],
+    gather_fn: Callable[[], Dict[str, str]],
+    diagnose_fn: Callable[..., Any],
+    diagnostician: Diagnostician,
+    kubectl: Kubectl,
+    output_format: str = "rich",
+    auto_fix: bool = False,
+    yes: bool = False,
+) -> None:
+    """Generic diagnosis flow for any Kubernetes resource.
+
+    Args:
+        resource_type: Type of resource (pod, node, deployment, service).
+        resource_name: Name of the resource.
+        namespace: Kubernetes namespace (None for cluster-scoped resources).
+        gather_fn: Callable that gathers diagnostics (no args, already bound).
+        diagnose_fn: Diagnostician method to call (e.g. diagnostician.diagnose_pod).
+        diagnostician: Diagnostician instance.
+        kubectl: Kubectl instance.
+        output_format: Output format (rich or json).
+        auto_fix: If True, automatically apply suggested fixes.
+        yes: If True, skip confirmation prompts for fixes.
+    """
+    # Gather diagnostics
+    label = f"{resource_type} '{resource_name}'"
+    with console.status(f"[cyan]Gathering diagnostics for {label}...[/cyan]"):
+        try:
+            diagnostics = gather_fn()
+        except KubectlError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            raise typer.Exit(1)
+
+    # Analyze with AI
+    try:
+        diagnosis: str
+        if output_format == "json":
+            diagnosis = diagnose_fn(resource_name, diagnostics, stream=False)
+            token_usage = diagnostician.get_token_usage()
+            output_json(resource_type, resource_name, namespace, diagnosis, diagnostics, token_usage)
+        else:
+            console.print("[cyan]Analyzing with AI...[/cyan]")
+            if auto_fix:
+                diagnosis = diagnose_fn(resource_name, diagnostics, stream=False)
+                console.print()
+                console.print(
+                    Panel(
+                        Markdown(diagnosis),
+                        title=f"[bold cyan]Diagnosis for {label}[/bold cyan]",
+                        border_style="cyan",
+                    )
+                )
+            else:
+                diagnosis_stream = diagnose_fn(resource_name, diagnostics, stream=True)
+                stream_diagnosis(diagnosis_stream, resource_type, resource_name)
+
+            token_usage = diagnostician.get_token_usage()
+            display_token_usage(token_usage)
+
+            if auto_fix:
+                commands = extract_kubectl_commands(diagnosis)
+                apply_fixes(commands, auto_yes=yes)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        if output_format == "json":
+            error_output: Dict[str, Any] = {
+                "error": str(e),
+                "resource_type": resource_type,
+                "resource_name": resource_name,
+            }
+            if namespace:
+                error_output["namespace"] = namespace
+            print(json.dumps(error_output, indent=2))
+        else:
+            console.print(f"[red]Error: Failed to get AI diagnosis: {e}[/red]")
+        raise typer.Exit(1)
+
+
+def _check_cluster(kubectl: Kubectl) -> None:
+    """Check cluster access and exit if unavailable."""
+    if not kubectl.check_cluster_access():
+        console.print("[red]Error: Cannot access Kubernetes cluster.[/red]")
+        console.print("\nMake sure:")
+        console.print("  \u2022 kubectl is installed")
+        console.print("  \u2022 You have a valid kubeconfig")
+        console.print("  \u2022 The cluster is running")
+        raise typer.Exit(1)
+
+
 @config_app.command("set")
 def config_set(
     key: str = typer.Argument(..., help="Configuration key (e.g., api-key)"),
     value: str = typer.Argument(..., help="Configuration value"),
 ) -> None:
     """Set a configuration value.
-
-    Args:
-        key: Configuration key to set (currently only 'api-key' is supported).
-        value: Value to set for the configuration key.
 
     Example:
         $ kfix config set api-key sk-ant-api03-...
@@ -273,7 +361,7 @@ def config_set(
 
     if key == "api-key":
         config.set_api_key(value)
-        console.print(f"[green]✓[/green] API key saved to {config.config_file}")
+        console.print(f"[green]\u2713[/green] API key saved to {config.config_file}")
     else:
         console.print(f"[red]Error: Unknown config key '{key}'[/red]")
         raise typer.Exit(1)
@@ -283,6 +371,7 @@ def config_set(
 def diagnose_pod(
     pod_name: str = typer.Argument(..., help="Name of the pod to diagnose"),
     namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
+    context: Optional[str] = typer.Option(None, "--context", help="Kubernetes context to use"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable kubectl result caching"),
     output_format: str = typer.Option("rich", "-o", "--output", help="Output format (rich or json)"),
     model: str = typer.Option(
@@ -291,102 +380,28 @@ def diagnose_pod(
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
 ) -> None:
-    """Diagnose a pod issue.
-
-    Gathers diagnostic information about a pod and uses AI to analyze
-    the data and provide actionable insights.
-
-    Args:
-        pod_name: Name of the pod to diagnose.
-        namespace: Kubernetes namespace where the pod is located.
-        no_cache: If True, disable kubectl result caching.
-        output_format: Output format (rich or json).
-        model: Claude model to use.
-        auto_fix: If True, automatically apply suggested fixes.
-        yes: If True, skip confirmation prompts when applying fixes.
-
-    Example:
-        $ kfix diagnose pod my-app -n production
-        $ kfix diagnose pod my-app --no-cache
-        $ kfix diagnose pod my-app -o json
-        $ kfix diagnose pod my-app --model opus
-        $ kfix diagnose pod my-app --auto-fix
-        $ kfix diagnose pod my-app --auto-fix --yes
-    """
-    # Check cluster access
-    kubectl = Kubectl(use_cache=not no_cache)
-    if not kubectl.check_cluster_access():
-        console.print("[red]Error: Cannot access Kubernetes cluster.[/red]")
-        console.print("\nMake sure:")
-        console.print("  • kubectl is installed")
-        console.print("  • You have a valid kubeconfig")
-        console.print("  • The cluster is running")
-        raise typer.Exit(1)
-
-    # Get diagnostician
+    """Diagnose a pod issue."""
+    kubectl = Kubectl(use_cache=not no_cache, context=context)
+    _check_cluster(kubectl)
     diagnostician = get_diagnostician(model=model)
-
-    # Gather diagnostics
-    with console.status(f"[cyan]Gathering diagnostics for pod '{pod_name}'...[/cyan]"):
-        try:
-            diagnostics = kubectl.gather_pod_diagnostics(pod_name, namespace)
-        except KubectlError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
-
-    # Analyze with AI
-    try:
-        diagnosis: str
-        if output_format == "json":
-            # Non-streaming for JSON output
-            diagnosis = diagnostician.diagnose_pod(pod_name, diagnostics, stream=False)
-            token_usage = diagnostician.get_token_usage()
-            output_json("pod", pod_name, namespace, diagnosis, diagnostics, token_usage)
-        else:
-            # Streaming for rich output
-            console.print("[cyan]Analyzing with AI...[/cyan]")
-            if auto_fix:
-                # Need non-streaming for auto-fix to extract commands
-                diagnosis = diagnostician.diagnose_pod(pod_name, diagnostics, stream=False)
-                console.print()
-                console.print(
-                    Panel(
-                        Markdown(diagnosis),
-                        title=f"[bold cyan]Diagnosis for pod '{pod_name}'[/bold cyan]",
-                        border_style="cyan",
-                    )
-                )
-            else:
-                # Stream output normally
-                diagnosis_stream = diagnostician.diagnose_pod(pod_name, diagnostics, stream=True)
-                stream_diagnosis(diagnosis_stream, "pod", pod_name)
-
-            # Display token usage
-            token_usage = diagnostician.get_token_usage()
-            display_token_usage(token_usage)
-
-            # Apply fixes if requested
-            if auto_fix:
-                commands = extract_kubectl_commands(diagnosis)
-                apply_fixes(commands, auto_yes=yes)
-
-    except Exception as e:
-        if output_format == "json":
-            error_output = {
-                "error": str(e),
-                "resource_type": "pod",
-                "resource_name": pod_name,
-                "namespace": namespace,
-            }
-            print(json.dumps(error_output, indent=2))
-        else:
-            console.print(f"[red]Error: Failed to get AI diagnosis: {e}[/red]")
-        raise typer.Exit(1)
+    _diagnose_resource(
+        resource_type="pod",
+        resource_name=pod_name,
+        namespace=namespace,
+        gather_fn=lambda: kubectl.gather_pod_diagnostics(pod_name, namespace),
+        diagnose_fn=diagnostician.diagnose_pod,
+        diagnostician=diagnostician,
+        kubectl=kubectl,
+        output_format=output_format,
+        auto_fix=auto_fix,
+        yes=yes,
+    )
 
 
 @diagnose_app.command("node")
 def diagnose_node(
     node_name: str = typer.Argument(..., help="Name of the node to diagnose"),
+    context: Optional[str] = typer.Option(None, "--context", help="Kubernetes context to use"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable kubectl result caching"),
     output_format: str = typer.Option("rich", "-o", "--output", help="Output format (rich or json)"),
     model: str = typer.Option(
@@ -395,93 +410,29 @@ def diagnose_node(
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
 ) -> None:
-    """Diagnose a node issue.
-
-    Gathers diagnostic information about a node and uses AI to analyze
-    the data and provide actionable insights.
-
-    Args:
-        node_name: Name of the node to diagnose.
-        no_cache: If True, disable kubectl result caching.
-        output_format: Output format (rich or json).
-        model: Claude model to use.
-        auto_fix: If True, automatically apply suggested fixes.
-        yes: If True, skip confirmation prompts when applying fixes.
-
-    Example:
-        $ kfix diagnose node worker-1
-        $ kfix diagnose node worker-1 --no-cache
-        $ kfix diagnose node worker-1 -o json
-        $ kfix diagnose node worker-1 --model opus
-        $ kfix diagnose node worker-1 --auto-fix
-    """
-    # Check cluster access
-    kubectl = Kubectl(use_cache=not no_cache)
-    if not kubectl.check_cluster_access():
-        console.print("[red]Error: Cannot access Kubernetes cluster.[/red]")
-        console.print("\nMake sure:")
-        console.print("  • kubectl is installed")
-        console.print("  • You have a valid kubeconfig")
-        console.print("  • The cluster is running")
-        raise typer.Exit(1)
-
-    # Get diagnostician
+    """Diagnose a node issue."""
+    kubectl = Kubectl(use_cache=not no_cache, context=context)
+    _check_cluster(kubectl)
     diagnostician = get_diagnostician(model=model)
-
-    # Gather diagnostics
-    with console.status(f"[cyan]Gathering diagnostics for node '{node_name}'...[/cyan]"):
-        try:
-            diagnostics = kubectl.gather_node_diagnostics(node_name)
-        except KubectlError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
-
-    # Analyze with AI
-    try:
-        diagnosis: str
-        if output_format == "json":
-            diagnosis = diagnostician.diagnose_node(node_name, diagnostics, stream=False)
-            token_usage = diagnostician.get_token_usage()
-            output_json("node", node_name, None, diagnosis, diagnostics, token_usage)
-        else:
-            console.print("[cyan]Analyzing with AI...[/cyan]")
-            if auto_fix:
-                diagnosis = diagnostician.diagnose_node(node_name, diagnostics, stream=False)
-                console.print()
-                console.print(
-                    Panel(
-                        Markdown(diagnosis),
-                        title=f"[bold cyan]Diagnosis for node '{node_name}'[/bold cyan]",
-                        border_style="cyan",
-                    )
-                )
-            else:
-                diagnosis_stream = diagnostician.diagnose_node(node_name, diagnostics, stream=True)
-                stream_diagnosis(diagnosis_stream, "node", node_name)
-            token_usage = diagnostician.get_token_usage()
-            display_token_usage(token_usage)
-
-            if auto_fix:
-                commands = extract_kubectl_commands(diagnosis)
-                apply_fixes(commands, auto_yes=yes)
-
-    except Exception as e:
-        if output_format == "json":
-            error_output = {
-                "error": str(e),
-                "resource_type": "node",
-                "resource_name": node_name,
-            }
-            print(json.dumps(error_output, indent=2))
-        else:
-            console.print(f"[red]Error: Failed to get AI diagnosis: {e}[/red]")
-        raise typer.Exit(1)
+    _diagnose_resource(
+        resource_type="node",
+        resource_name=node_name,
+        namespace=None,
+        gather_fn=lambda: kubectl.gather_node_diagnostics(node_name),
+        diagnose_fn=diagnostician.diagnose_node,
+        diagnostician=diagnostician,
+        kubectl=kubectl,
+        output_format=output_format,
+        auto_fix=auto_fix,
+        yes=yes,
+    )
 
 
 @diagnose_app.command("deployment")
 def diagnose_deployment(
     deployment_name: str = typer.Argument(..., help="Name of the deployment to diagnose"),
     namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
+    context: Optional[str] = typer.Option(None, "--context", help="Kubernetes context to use"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable kubectl result caching"),
     output_format: str = typer.Option("rich", "-o", "--output", help="Output format (rich or json)"),
     model: str = typer.Option(
@@ -490,103 +441,29 @@ def diagnose_deployment(
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
 ) -> None:
-    """Diagnose a deployment issue.
-
-    Gathers diagnostic information about a deployment and uses AI to analyze
-    the data and provide actionable insights.
-
-    Args:
-        deployment_name: Name of the deployment to diagnose.
-        namespace: Kubernetes namespace where the deployment is located.
-        no_cache: If True, disable kubectl result caching.
-        output_format: Output format (rich or json).
-        model: Claude model to use.
-        auto_fix: If True, automatically apply suggested fixes.
-        yes: If True, skip confirmation prompts when applying fixes.
-
-    Example:
-        $ kfix diagnose deployment my-app -n production
-        $ kfix diagnose deployment my-app --no-cache
-        $ kfix diagnose deployment my-app -o json
-        $ kfix diagnose deployment my-app --model opus
-        $ kfix diagnose deployment my-app --auto-fix
-    """
-    # Check cluster access
-    kubectl = Kubectl(use_cache=not no_cache)
-    if not kubectl.check_cluster_access():
-        console.print("[red]Error: Cannot access Kubernetes cluster.[/red]")
-        console.print("\nMake sure:")
-        console.print("  • kubectl is installed")
-        console.print("  • You have a valid kubeconfig")
-        console.print("  • The cluster is running")
-        raise typer.Exit(1)
-
-    # Get diagnostician
+    """Diagnose a deployment issue."""
+    kubectl = Kubectl(use_cache=not no_cache, context=context)
+    _check_cluster(kubectl)
     diagnostician = get_diagnostician(model=model)
-
-    # Gather diagnostics
-    with console.status(
-        f"[cyan]Gathering diagnostics for deployment '{deployment_name}'...[/cyan]"
-    ):
-        try:
-            diagnostics = kubectl.gather_deployment_diagnostics(deployment_name, namespace)
-        except KubectlError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
-
-    # Analyze with AI
-    try:
-        diagnosis: str
-        if output_format == "json":
-            diagnosis = diagnostician.diagnose_deployment(
-                deployment_name, diagnostics, stream=False
-            )
-            token_usage = diagnostician.get_token_usage()
-            output_json("deployment", deployment_name, namespace, diagnosis, diagnostics, token_usage)
-        else:
-            console.print("[cyan]Analyzing with AI...[/cyan]")
-            if auto_fix:
-                diagnosis = diagnostician.diagnose_deployment(
-                    deployment_name, diagnostics, stream=False
-                )
-                console.print()
-                console.print(
-                    Panel(
-                        Markdown(diagnosis),
-                        title=f"[bold cyan]Diagnosis for deployment '{deployment_name}'[/bold cyan]",
-                        border_style="cyan",
-                    )
-                )
-            else:
-                diagnosis_stream = diagnostician.diagnose_deployment(
-                    deployment_name, diagnostics, stream=True
-                )
-                stream_diagnosis(diagnosis_stream, "deployment", deployment_name)
-            token_usage = diagnostician.get_token_usage()
-            display_token_usage(token_usage)
-
-            if auto_fix:
-                commands = extract_kubectl_commands(diagnosis)
-                apply_fixes(commands, auto_yes=yes)
-
-    except Exception as e:
-        if output_format == "json":
-            error_output = {
-                "error": str(e),
-                "resource_type": "deployment",
-                "resource_name": deployment_name,
-                "namespace": namespace,
-            }
-            print(json.dumps(error_output, indent=2))
-        else:
-            console.print(f"[red]Error: Failed to get AI diagnosis: {e}[/red]")
-        raise typer.Exit(1)
+    _diagnose_resource(
+        resource_type="deployment",
+        resource_name=deployment_name,
+        namespace=namespace,
+        gather_fn=lambda: kubectl.gather_deployment_diagnostics(deployment_name, namespace),
+        diagnose_fn=diagnostician.diagnose_deployment,
+        diagnostician=diagnostician,
+        kubectl=kubectl,
+        output_format=output_format,
+        auto_fix=auto_fix,
+        yes=yes,
+    )
 
 
 @diagnose_app.command("service")
 def diagnose_service(
     service_name: str = typer.Argument(..., help="Name of the service to diagnose"),
     namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
+    context: Optional[str] = typer.Option(None, "--context", help="Kubernetes context to use"),
     no_cache: bool = typer.Option(False, "--no-cache", help="Disable kubectl result caching"),
     output_format: str = typer.Option("rich", "-o", "--output", help="Output format (rich or json)"),
     model: str = typer.Option(
@@ -595,91 +472,155 @@ def diagnose_service(
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
 ) -> None:
-    """Diagnose a service issue.
+    """Diagnose a service issue."""
+    kubectl = Kubectl(use_cache=not no_cache, context=context)
+    _check_cluster(kubectl)
+    diagnostician = get_diagnostician(model=model)
+    _diagnose_resource(
+        resource_type="service",
+        resource_name=service_name,
+        namespace=namespace,
+        gather_fn=lambda: kubectl.gather_service_diagnostics(service_name, namespace),
+        diagnose_fn=diagnostician.diagnose_service,
+        diagnostician=diagnostician,
+        kubectl=kubectl,
+        output_format=output_format,
+        auto_fix=auto_fix,
+        yes=yes,
+    )
 
-    Gathers diagnostic information about a service and uses AI to analyze
-    the data and provide actionable insights.
 
-    Args:
-        service_name: Name of the service to diagnose.
-        namespace: Kubernetes namespace where the service is located.
-        no_cache: If True, disable kubectl result caching.
-        output_format: Output format (rich or json).
-        model: Claude model to use.
-        auto_fix: If True, automatically apply suggested fixes.
-        yes: If True, skip confirmation prompts when applying fixes.
+@app.command("scan")
+def scan(
+    namespace: Optional[str] = typer.Option(
+        None, "-n", "--namespace", help="Kubernetes namespace to scan"
+    ),
+    all_namespaces: bool = typer.Option(
+        False, "-A", "--all-namespaces", help="Scan all namespaces"
+    ),
+    context: Optional[str] = typer.Option(None, "--context", help="Kubernetes context to use"),
+    model: str = typer.Option(
+        "sonnet", "--model", help="Claude model to use (sonnet, opus, haiku)"
+    ),
+    output_format: str = typer.Option("rich", "-o", "--output", help="Output format (rich or json)"),
+) -> None:
+    """Scan for unhealthy resources in a namespace or across all namespaces.
 
     Example:
-        $ kfix diagnose service my-app -n production
-        $ kfix diagnose service my-app --no-cache
-        $ kfix diagnose service my-app -o json
-        $ kfix diagnose service my-app --model opus
-        $ kfix diagnose service my-app --auto-fix
+        $ kfix scan -n production
+        $ kfix scan --all-namespaces
+        $ kfix scan --context my-cluster
     """
-    # Check cluster access
-    kubectl = Kubectl(use_cache=not no_cache)
-    if not kubectl.check_cluster_access():
-        console.print("[red]Error: Cannot access Kubernetes cluster.[/red]")
-        console.print("\nMake sure:")
-        console.print("  • kubectl is installed")
-        console.print("  • You have a valid kubeconfig")
-        console.print("  • The cluster is running")
-        raise typer.Exit(1)
+    kubectl = Kubectl(context=context)
+    _check_cluster(kubectl)
 
-    # Get diagnostician
+    # Scan for unhealthy resources
+    with console.status("[cyan]Scanning for unhealthy resources...[/cyan]"):
+        if all_namespaces:
+            unhealthy = kubectl.scan_all_namespaces()
+        else:
+            ns = namespace or "default"
+            unhealthy = kubectl.scan_namespace(ns)
+
+    if not unhealthy:
+        if output_format == "json":
+            print(json.dumps({"resources": [], "total": 0}, indent=2))
+        else:
+            console.print("[green]\u2713 No unhealthy resources found.[/green]")
+        return
+
+    # Display summary table
+    if output_format != "json":
+        table = Table(title="Unhealthy Resources", border_style="red")
+        table.add_column("Kind", style="cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Namespace", style="dim")
+        table.add_column("Status", style="yellow")
+        table.add_column("Reason", style="red")
+
+        for r in unhealthy:
+            table.add_row(r["kind"], r["name"], r["namespace"] or "-", r["status"], r["reason"])
+
+        console.print()
+        console.print(table)
+        console.print(f"\n[bold red]Found {len(unhealthy)} unhealthy resource(s).[/bold red]")
+
+    # Diagnose each with AI
     diagnostician = get_diagnostician(model=model)
 
-    # Gather diagnostics
-    with console.status(f"[cyan]Gathering diagnostics for service '{service_name}'...[/cyan]"):
-        try:
-            diagnostics = kubectl.gather_service_diagnostics(service_name, namespace)
-        except KubectlError as e:
-            console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+    # Map resource types to their gather and diagnose functions
+    gather_map: Dict[str, Callable[..., Dict[str, str]]] = {
+        "pod": kubectl.gather_pod_diagnostics,
+        "node": kubectl.gather_node_diagnostics,
+        "deployment": kubectl.gather_deployment_diagnostics,
+        "service": kubectl.gather_service_diagnostics,
+    }
+    diagnose_map: Dict[str, Callable[..., Any]] = {
+        "pod": diagnostician.diagnose_pod,
+        "node": diagnostician.diagnose_node,
+        "deployment": diagnostician.diagnose_deployment,
+        "service": diagnostician.diagnose_service,
+    }
 
-    # Analyze with AI
-    try:
-        diagnosis: str
-        if output_format == "json":
-            diagnosis = diagnostician.diagnose_service(service_name, diagnostics, stream=False)
-            token_usage = diagnostician.get_token_usage()
-            output_json("service", service_name, namespace, diagnosis, diagnostics, token_usage)
-        else:
-            console.print("[cyan]Analyzing with AI...[/cyan]")
-            if auto_fix:
-                diagnosis = diagnostician.diagnose_service(service_name, diagnostics, stream=False)
-                console.print()
+    results: List[Dict[str, Any]] = []
+
+    for i, resource in enumerate(unhealthy):
+        kind = resource["kind"]
+        name = resource["name"]
+        ns = resource["namespace"]
+        label = f"{kind}/{name}" + (f" ({ns})" if ns else "")
+
+        if output_format != "json":
+            console.print(f"\n[cyan]({i + 1}/{len(unhealthy)}) Diagnosing {label}...[/cyan]")
+
+        gather_fn = gather_map.get(kind)
+        diagnose_fn = diagnose_map.get(kind)
+
+        if not gather_fn or not diagnose_fn:
+            continue
+
+        try:
+            # Gather diagnostics
+            if kind == "node":
+                diagnostics = gather_fn(name)
+            else:
+                diagnostics = gather_fn(name, ns)
+
+            # Get AI diagnosis (non-streaming for scan)
+            diagnosis = diagnose_fn(name, diagnostics, stream=False)
+
+            if output_format == "json":
+                results.append({
+                    "kind": kind,
+                    "name": name,
+                    "namespace": ns,
+                    "status": resource["status"],
+                    "reason": resource["reason"],
+                    "diagnosis": diagnosis,
+                })
+            else:
                 console.print(
                     Panel(
                         Markdown(diagnosis),
-                        title=f"[bold cyan]Diagnosis for service '{service_name}'[/bold cyan]",
+                        title=f"[bold cyan]Diagnosis for {label}[/bold cyan]",
                         border_style="cyan",
                     )
                 )
+                display_token_usage(diagnostician.get_token_usage())
+
+        except Exception as e:
+            if output_format == "json":
+                results.append({
+                    "kind": kind,
+                    "name": name,
+                    "namespace": ns,
+                    "error": str(e),
+                })
             else:
-                diagnosis_stream = diagnostician.diagnose_service(
-                    service_name, diagnostics, stream=True
-                )
-                stream_diagnosis(diagnosis_stream, "service", service_name)
-            token_usage = diagnostician.get_token_usage()
-            display_token_usage(token_usage)
+                console.print(f"[red]Failed to diagnose {label}: {e}[/red]")
 
-            if auto_fix:
-                commands = extract_kubectl_commands(diagnosis)
-                apply_fixes(commands, auto_yes=yes)
-
-    except Exception as e:
-        if output_format == "json":
-            error_output = {
-                "error": str(e),
-                "resource_type": "service",
-                "resource_name": service_name,
-                "namespace": namespace,
-            }
-            print(json.dumps(error_output, indent=2))
-        else:
-            console.print(f"[red]Error: Failed to get AI diagnosis: {e}[/red]")
-        raise typer.Exit(1)
+    if output_format == "json":
+        print(json.dumps({"resources": results, "total": len(unhealthy)}, indent=2))
 
 
 @app.command("explain")
@@ -691,22 +632,13 @@ def explain(
 ) -> None:
     """Explain a Kubernetes error in plain English.
 
-    Provides a detailed explanation of any Kubernetes error message,
-    including common causes and how to fix it.
-
-    Args:
-        error: The Kubernetes error message to explain.
-        model: Claude model to use.
-
     Example:
         $ kfix explain "CrashLoopBackOff"
         $ kfix explain "ImagePullBackOff"
         $ kfix explain "OOMKilled" --model opus
     """
-    # Get diagnostician
     diagnostician = get_diagnostician(model=model)
 
-    # Get explanation
     with console.status("[cyan]Getting explanation...[/cyan]"):
         try:
             explanation = diagnostician.explain_error(error)
@@ -714,7 +646,6 @@ def explain(
             console.print(f"[red]Error: Failed to get explanation: {e}[/red]")
             raise typer.Exit(1)
 
-    # Display results
     console.print()
     console.print(
         Panel(

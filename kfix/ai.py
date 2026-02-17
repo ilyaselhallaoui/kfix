@@ -1,6 +1,6 @@
 """AI-powered diagnosis using Claude."""
 
-from typing import Dict, Iterator, Tuple, NamedTuple
+from typing import Dict, Iterator, Optional, Tuple, NamedTuple, Union
 
 from anthropic import Anthropic, APIError, RateLimitError, APITimeoutError
 from tenacity import (
@@ -162,7 +162,7 @@ Keep your response under 300 words. Be specific and actionable.""",
 
         self.model = self.MODELS[model]
         self.model_name = model
-        self.last_token_usage: TokenUsage | None = None
+        self.last_token_usage: Optional[TokenUsage] = None
 
     @retry(
         stop=stop_after_attempt(3),
@@ -170,7 +170,7 @@ Keep your response under 300 words. Be specific and actionable.""",
         retry=retry_if_exception_type((RateLimitError, APITimeoutError, APIError)),
         before_sleep=before_sleep_log(logger, logging.WARNING),
     )
-    def _make_api_call(self, prompt: str, stream: bool = False) -> str | Iterator[str]:
+    def _make_api_call(self, prompt: str, stream: bool = False) -> Union[str, Iterator[str]]:
         """Make API call to Claude with retry logic.
 
         Args:
@@ -209,7 +209,7 @@ Keep your response under 300 words. Be specific and actionable.""",
         resource_name: str,
         diagnostics: Dict[str, str],
         stream: bool = False,
-    ) -> str | Iterator[str]:
+    ) -> Union[str, Iterator[str]]:
         """Generic diagnosis method for any Kubernetes resource type.
 
         Args:
@@ -281,7 +281,7 @@ Keep your response under 300 words. Be specific and actionable.""",
 
     def diagnose_pod(
         self, pod_name: str, diagnostics: Dict[str, str], stream: bool = False
-    ) -> str | Iterator[str]:
+    ) -> Union[str, Iterator[str]]:
         """Diagnose pod issues using AI analysis.
 
         Analyzes pod diagnostics including description, logs, events,
@@ -313,7 +313,7 @@ Keep your response under 300 words. Be specific and actionable.""",
 
     def diagnose_node(
         self, node_name: str, diagnostics: Dict[str, str], stream: bool = False
-    ) -> str | Iterator[str]:
+    ) -> Union[str, Iterator[str]]:
         """Diagnose node issues using AI analysis.
 
         Analyzes node diagnostics including description and events
@@ -339,7 +339,7 @@ Keep your response under 300 words. Be specific and actionable.""",
 
     def diagnose_deployment(
         self, deployment_name: str, diagnostics: Dict[str, str], stream: bool = False
-    ) -> str | Iterator[str]:
+    ) -> Union[str, Iterator[str]]:
         """Diagnose deployment issues using AI analysis.
 
         Analyzes deployment diagnostics including description and events
@@ -365,7 +365,7 @@ Keep your response under 300 words. Be specific and actionable.""",
 
     def diagnose_service(
         self, service_name: str, diagnostics: Dict[str, str], stream: bool = False
-    ) -> str | Iterator[str]:
+    ) -> Union[str, Iterator[str]]:
         """Diagnose service issues using AI analysis.
 
         Analyzes service diagnostics including description and endpoints
@@ -436,7 +436,7 @@ Keep your response under 300 words. Be clear and actionable."""
         except APIError as e:
             raise Exception(f"API error: {e}. Please try again later.")
 
-    def get_token_usage(self) -> TokenUsage | None:
+    def get_token_usage(self) -> Optional[TokenUsage]:
         """Get token usage from the last API call.
 
         Returns:

@@ -1,8 +1,9 @@
 """Kubectl wrapper for gathering Kubernetes diagnostics."""
 
+import json as _json
 import subprocess
 import time
-from typing import Dict, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 
 class KubectlError(Exception):
@@ -22,18 +23,22 @@ class Kubectl:
         use_cache: Whether to use caching (default: True).
     """
 
-    def __init__(self, cache_ttl: int = 300, use_cache: bool = True) -> None:
+    def __init__(
+        self, cache_ttl: int = 300, use_cache: bool = True, context: Optional[str] = None
+    ) -> None:
         """Initialize Kubectl wrapper.
 
         Args:
             cache_ttl: Time-to-live for cache entries in seconds.
             use_cache: Whether to enable caching.
+            context: Kubernetes context to use. If None, uses current context.
         """
         self.cache_ttl = cache_ttl
         self.use_cache = use_cache
+        self.context = context
         self._cache: Dict[str, Tuple[float, str, str, int]] = {}
 
-    def _cache_key(self, args: list[str]) -> str:
+    def _cache_key(self, args: List[str]) -> str:
         """Generate cache key from kubectl arguments.
 
         Args:
@@ -44,7 +49,7 @@ class Kubectl:
         """
         return "|".join(args)
 
-    def _get_cached(self, args: list[str]) -> Optional[Tuple[str, str, int]]:
+    def _get_cached(self, args: List[str]) -> Optional[Tuple[str, str, int]]:
         """Get cached result if available and not expired.
 
         Args:
@@ -64,7 +69,7 @@ class Kubectl:
 
         return None
 
-    def _set_cached(self, args: list[str], result: Tuple[str, str, int]) -> None:
+    def _set_cached(self, args: List[str], result: Tuple[str, str, int]) -> None:
         """Store result in cache.
 
         Args:
@@ -82,7 +87,7 @@ class Kubectl:
         """Clear all cached results."""
         self._cache.clear()
 
-    def _run(self, args: list[str], check: bool = True) -> Tuple[str, str, int]:
+    def _run(self, args: List[str], check: bool = True) -> Tuple[str, str, int]:
         """Run a kubectl command and return its output.
 
         Args:
@@ -99,6 +104,10 @@ class Kubectl:
             >>> kubectl = Kubectl()
             >>> stdout, stderr, code = kubectl._run(["get", "pods"])
         """
+        # Prepend --context if set
+        if self.context:
+            args = ["--context", self.context] + args
+
         # Check cache first
         cached_result = self._get_cached(args)
         if cached_result is not None:
@@ -428,3 +437,187 @@ class Kubectl:
             "describe": self.describe_service(service_name, namespace),
             "endpoints": self.get_service_endpoints(service_name, namespace),
         }
+
+    def scan_namespace(self, namespace: str = "default") -> List[Dict[str, str]]:
+        """Scan a namespace for unhealthy resources.
+
+        Args:
+            namespace: Kubernetes namespace to scan.
+
+        Returns:
+            List of dicts with keys: 'kind', 'name', 'namespace', 'status', 'reason'.
+        """
+        unhealthy: List[Dict[str, str]] = []
+
+        # Scan pods
+        try:
+            stdout, _, _ = self._run(
+                ["get", "pods", "-n", namespace, "-o", "json"], check=False
+            )
+            if stdout.strip():
+                data = _json.loads(stdout)
+                for item in data.get("items", []):
+                    phase = item.get("status", {}).get("phase", "Unknown")
+                    if phase not in ("Running", "Succeeded"):
+                        name = item.get("metadata", {}).get("name", "unknown")
+                        reason = self._pod_failure_reason(item)
+                        unhealthy.append({
+                            "kind": "pod",
+                            "name": name,
+                            "namespace": namespace,
+                            "status": phase,
+                            "reason": reason,
+                        })
+        except (KubectlError, _json.JSONDecodeError):
+            pass
+
+        # Scan deployments
+        try:
+            stdout, _, _ = self._run(
+                ["get", "deployments", "-n", namespace, "-o", "json"], check=False
+            )
+            if stdout.strip():
+                data = _json.loads(stdout)
+                for item in data.get("items", []):
+                    status = item.get("status", {})
+                    desired = item.get("spec", {}).get("replicas", 0)
+                    available = status.get("availableReplicas", 0) or 0
+                    if available < desired:
+                        name = item.get("metadata", {}).get("name", "unknown")
+                        unhealthy.append({
+                            "kind": "deployment",
+                            "name": name,
+                            "namespace": namespace,
+                            "status": f"{available}/{desired} available",
+                            "reason": "Insufficient replicas",
+                        })
+        except (KubectlError, _json.JSONDecodeError):
+            pass
+
+        # Scan nodes (cluster-scoped, only if namespace is "default" to avoid duplicates)
+        if namespace == "default":
+            unhealthy.extend(self._scan_nodes())
+
+        return unhealthy
+
+    def scan_all_namespaces(self) -> List[Dict[str, str]]:
+        """Scan all namespaces for unhealthy resources.
+
+        Returns:
+            List of dicts with keys: 'kind', 'name', 'namespace', 'status', 'reason'.
+        """
+        unhealthy: List[Dict[str, str]] = []
+
+        # Get all namespaces
+        try:
+            stdout, _, _ = self._run(["get", "namespaces", "-o", "json"], check=False)
+            if stdout.strip():
+                data = _json.loads(stdout)
+                namespaces = [
+                    item.get("metadata", {}).get("name", "")
+                    for item in data.get("items", [])
+                ]
+        except (KubectlError, _json.JSONDecodeError):
+            namespaces = ["default"]
+
+        for ns in namespaces:
+            # Scan pods and deployments per namespace (skip nodes, handled separately)
+            try:
+                stdout, _, _ = self._run(
+                    ["get", "pods", "-n", ns, "-o", "json"], check=False
+                )
+                if stdout.strip():
+                    data = _json.loads(stdout)
+                    for item in data.get("items", []):
+                        phase = item.get("status", {}).get("phase", "Unknown")
+                        if phase not in ("Running", "Succeeded"):
+                            name = item.get("metadata", {}).get("name", "unknown")
+                            reason = self._pod_failure_reason(item)
+                            unhealthy.append({
+                                "kind": "pod",
+                                "name": name,
+                                "namespace": ns,
+                                "status": phase,
+                                "reason": reason,
+                            })
+            except (KubectlError, _json.JSONDecodeError):
+                pass
+
+            try:
+                stdout, _, _ = self._run(
+                    ["get", "deployments", "-n", ns, "-o", "json"], check=False
+                )
+                if stdout.strip():
+                    data = _json.loads(stdout)
+                    for item in data.get("items", []):
+                        status = item.get("status", {})
+                        desired = item.get("spec", {}).get("replicas", 0)
+                        available = status.get("availableReplicas", 0) or 0
+                        if available < desired:
+                            name = item.get("metadata", {}).get("name", "unknown")
+                            unhealthy.append({
+                                "kind": "deployment",
+                                "name": name,
+                                "namespace": ns,
+                                "status": f"{available}/{desired} available",
+                                "reason": "Insufficient replicas",
+                            })
+            except (KubectlError, _json.JSONDecodeError):
+                pass
+
+        # Scan nodes once (cluster-scoped)
+        unhealthy.extend(self._scan_nodes())
+
+        return unhealthy
+
+    def _scan_nodes(self) -> List[Dict[str, str]]:
+        """Scan nodes for unhealthy status.
+
+        Returns:
+            List of unhealthy node dicts.
+        """
+        unhealthy: List[Dict[str, str]] = []
+        try:
+            stdout, _, _ = self._run(["get", "nodes", "-o", "json"], check=False)
+            if stdout.strip():
+                data = _json.loads(stdout)
+                for item in data.get("items", []):
+                    name = item.get("metadata", {}).get("name", "unknown")
+                    conditions = item.get("status", {}).get("conditions", [])
+                    ready = False
+                    reason = "Unknown"
+                    for cond in conditions:
+                        if cond.get("type") == "Ready":
+                            ready = cond.get("status") == "True"
+                            reason = cond.get("reason", "Unknown")
+                    if not ready:
+                        unhealthy.append({
+                            "kind": "node",
+                            "name": name,
+                            "namespace": "",
+                            "status": "NotReady",
+                            "reason": reason,
+                        })
+        except (KubectlError, _json.JSONDecodeError):
+            pass
+        return unhealthy
+
+    @staticmethod
+    def _pod_failure_reason(pod: Dict[str, Any]) -> str:
+        """Extract a human-readable failure reason from a pod's status.
+
+        Args:
+            pod: Pod JSON object.
+
+        Returns:
+            Failure reason string.
+        """
+        container_statuses = pod.get("status", {}).get("containerStatuses", [])
+        for cs in container_statuses:
+            waiting = cs.get("state", {}).get("waiting", {})
+            if waiting:
+                return waiting.get("reason", "Unknown")
+            terminated = cs.get("state", {}).get("terminated", {})
+            if terminated:
+                return terminated.get("reason", "Unknown")
+        return pod.get("status", {}).get("reason", "Unknown")

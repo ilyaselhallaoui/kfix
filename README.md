@@ -4,7 +4,7 @@
 
 [![PyPI version](https://badge.fury.io/py/kfix.svg)](https://badge.fury.io/py/kfix)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://github.com/yourusername/kfix/workflows/Tests/badge.svg)](https://github.com/yourusername/kfix/actions)
+[![Tests](https://github.com/ilyaselhallaoui/kfix/workflows/Tests/badge.svg)](https://github.com/ilyaselhallaoui/kfix/actions)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
 ## What is kfix?
@@ -205,10 +205,15 @@ https://kubernetes.io/docs/concepts/architecture/nodes/
 
 ```bash
 # Diagnose resources
-kfix diagnose pod <name> [-n namespace]         # Diagnose a pod
-kfix diagnose node <name>                       # Diagnose a node
-kfix diagnose deployment <name> [-n namespace]  # Diagnose a deployment
-kfix diagnose service <name> [-n namespace]     # Diagnose a service
+kfix diagnose pod <name> [-n namespace] [--context ctx]         # Diagnose a pod
+kfix diagnose node <name> [--context ctx]                       # Diagnose a node
+kfix diagnose deployment <name> [-n namespace] [--context ctx]  # Diagnose a deployment
+kfix diagnose service <name> [-n namespace] [--context ctx]     # Diagnose a service
+
+# Scan for all broken resources
+kfix scan [-n namespace]                        # Scan a namespace
+kfix scan --all-namespaces                      # Scan everything
+kfix scan --context my-cluster                  # Scan a specific cluster
 
 # Explain errors
 kfix explain "<error>"                          # Explain any K8s error
@@ -259,7 +264,7 @@ kfix diagnose pod my-app
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/kfix.git
+git clone https://github.com/ilyaselhallaoui/kfix.git
 cd kfix
 
 # Create virtual environment
@@ -335,21 +340,18 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 ## Roadmap
 
-### In Progress
-- [ ] Auto-fix mode (apply fixes automatically)
-- [ ] Watch mode (continuous monitoring)
-- [ ] Interactive mode (follow-up questions)
+### Done
+- [x] Auto-fix mode (`--auto-fix`)
+- [x] Cluster scan (`kfix scan`)
+- [x] Multi-cluster support (`--context`)
 
 ### Planned
+- [ ] Watch mode (continuous monitoring)
+- [ ] Interactive mode (follow-up questions)
 - [ ] History/logging of diagnoses
-- [ ] Batch diagnosis (multiple resources)
 - [ ] PVC/Storage diagnosis
 - [ ] Network connectivity diagnosis
-- [ ] Cluster health check
-- [ ] Configuration comparison tool
-- [ ] Context and namespace management
 - [ ] Web dashboard
-- [ ] Slack/Discord integration
 
 ## License
 
@@ -357,9 +359,8 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Support
 
-- 🐛 **Issues**: [GitHub Issues](https://github.com/yourusername/kfix/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/yourusername/kfix/discussions)
-- 📖 **Documentation**: See [TESTING.md](TESTING.md) for detailed testing info
+- **Issues**: [GitHub Issues](https://github.com/ilyaselhallaoui/kfix/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/ilyaselhallaoui/kfix/discussions)
 
 ## Acknowledgments
 
