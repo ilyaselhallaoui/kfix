@@ -3,10 +3,9 @@
 import json
 from unittest.mock import Mock
 
-import pytest
 from typer.testing import CliRunner
 
-from kfix.cli import app, extract_kubectl_commands
+from kfix.cli import app, apply_fixes, extract_kubectl_commands
 
 runner = CliRunner()
 
@@ -387,3 +386,13 @@ kubectl get pods -n production
         diagnosis = "Everything looks fine."
         commands = extract_kubectl_commands(diagnosis)
         assert commands == []
+
+
+class TestAutoFixPolicy:
+    """Tests for auto-fix safety policy handling."""
+
+    def test_safe_policy_blocks_delete(self, mocker):
+        """Test safe policy does not execute risky commands."""
+        run_mock = mocker.patch("subprocess.run")
+        apply_fixes(["kubectl delete pod bad-pod -n default"], auto_yes=True, policy="safe")
+        run_mock.assert_not_called()

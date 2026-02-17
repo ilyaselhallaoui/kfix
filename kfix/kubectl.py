@@ -3,7 +3,7 @@
 import json as _json
 import subprocess
 import time
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class KubectlError(Exception):
@@ -124,10 +124,10 @@ class Kubectl:
             if check and result.returncode != 0:
                 raise KubectlError(f"kubectl failed: {result.stderr}")
             return output
-        except subprocess.TimeoutExpired:
-            raise KubectlError("kubectl command timed out")
-        except FileNotFoundError:
-            raise KubectlError("kubectl not found. Please install kubectl.")
+        except subprocess.TimeoutExpired as e:
+            raise KubectlError("kubectl command timed out") from e
+        except FileNotFoundError as e:
+            raise KubectlError("kubectl not found. Please install kubectl.") from e
 
     def check_cluster_access(self) -> bool:
         """Check if we can access the Kubernetes cluster.
@@ -141,8 +141,8 @@ class Kubectl:
             ...     print("Cluster is accessible")
         """
         try:
-            self._run(["cluster-info"], check=False)
-            return True
+            _, _, code = self._run(["cluster-info"], check=False)
+            return code == 0
         except KubectlError:
             return False
 
@@ -494,9 +494,11 @@ class Kubectl:
         except (KubectlError, _json.JSONDecodeError):
             pass
 
-        # Scan nodes (cluster-scoped, only if namespace is "default" to avoid duplicates)
-        if namespace == "default":
-            unhealthy.extend(self._scan_nodes())
+        # Scan services
+        unhealthy.extend(self._scan_services(namespace))
+
+        # Scan nodes once (cluster-scoped).
+        unhealthy.extend(self._scan_nodes())
 
         return unhealthy
 
@@ -543,6 +545,8 @@ class Kubectl:
             except (KubectlError, _json.JSONDecodeError):
                 pass
 
+            unhealthy.extend(self._scan_services(ns))
+
             try:
                 stdout, _, _ = self._run(
                     ["get", "deployments", "-n", ns, "-o", "json"], check=False
@@ -567,6 +571,78 @@ class Kubectl:
 
         # Scan nodes once (cluster-scoped)
         unhealthy.extend(self._scan_nodes())
+
+        return unhealthy
+
+    def _scan_services(self, namespace: str) -> List[Dict[str, str]]:
+        """Scan services for missing endpoints.
+
+        Args:
+            namespace: Kubernetes namespace to scan.
+
+        Returns:
+            List of unhealthy service dicts.
+        """
+        unhealthy: List[Dict[str, str]] = []
+
+        try:
+            services_stdout, _, _ = self._run(
+                ["get", "services", "-n", namespace, "-o", "json"], check=False
+            )
+            endpoints_stdout, _, _ = self._run(
+                ["get", "endpoints", "-n", namespace, "-o", "json"], check=False
+            )
+
+            if not services_stdout.strip():
+                return unhealthy
+
+            services_data = _json.loads(services_stdout)
+            endpoints_data = _json.loads(endpoints_stdout) if endpoints_stdout.strip() else {"items": []}
+
+            endpoints_by_name: Dict[str, Dict[str, Any]] = {}
+            for endpoint in endpoints_data.get("items", []):
+                endpoint_name = endpoint.get("metadata", {}).get("name")
+                if isinstance(endpoint_name, str) and endpoint_name:
+                    endpoints_by_name[endpoint_name] = endpoint
+
+            for service in services_data.get("items", []):
+                metadata = service.get("metadata", {})
+                spec = service.get("spec", {})
+
+                name = metadata.get("name", "unknown")
+                if not isinstance(name, str):
+                    name = "unknown"
+
+                service_type = spec.get("type", "ClusterIP")
+                if service_type == "ExternalName":
+                    continue
+
+                selector = spec.get("selector") or {}
+                if not selector:
+                    continue
+
+                endpoint_obj = endpoints_by_name.get(name, {})
+                subsets = endpoint_obj.get("subsets") or []
+
+                has_ready_addresses = False
+                for subset in subsets:
+                    addresses = subset.get("addresses") or []
+                    if addresses:
+                        has_ready_addresses = True
+                        break
+
+                if not has_ready_addresses:
+                    unhealthy.append(
+                        {
+                            "kind": "service",
+                            "name": name,
+                            "namespace": namespace,
+                            "status": "NoReadyEndpoints",
+                            "reason": "No ready endpoints",
+                        }
+                    )
+        except (KubectlError, _json.JSONDecodeError):
+            pass
 
         return unhealthy
 
@@ -612,12 +688,29 @@ class Kubectl:
         Returns:
             Failure reason string.
         """
-        container_statuses = pod.get("status", {}).get("containerStatuses", [])
+        status = pod.get("status", {})
+        if not isinstance(status, dict):
+            return "Unknown"
+
+        container_statuses = status.get("containerStatuses", [])
+        if not isinstance(container_statuses, list):
+            container_statuses = []
+
         for cs in container_statuses:
-            waiting = cs.get("state", {}).get("waiting", {})
+            if not isinstance(cs, dict):
+                continue
+            state = cs.get("state", {})
+            if not isinstance(state, dict):
+                continue
+
+            waiting = state.get("waiting", {})
             if waiting:
-                return waiting.get("reason", "Unknown")
-            terminated = cs.get("state", {}).get("terminated", {})
+                reason = waiting.get("reason", "Unknown")
+                return reason if isinstance(reason, str) else "Unknown"
+            terminated = state.get("terminated", {})
             if terminated:
-                return terminated.get("reason", "Unknown")
-        return pod.get("status", {}).get("reason", "Unknown")
+                reason = terminated.get("reason", "Unknown")
+                return reason if isinstance(reason, str) else "Unknown"
+
+        reason = status.get("reason", "Unknown")
+        return reason if isinstance(reason, str) else "Unknown"

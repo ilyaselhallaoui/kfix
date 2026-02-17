@@ -5,10 +5,9 @@ import re
 import shlex
 import subprocess
 from datetime import datetime
-from typing import Callable, Dict, Any, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 import typer
-from rich import print as rprint
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -28,6 +27,44 @@ app.add_typer(config_app, name="config")
 app.add_typer(diagnose_app, name="diagnose")
 
 console = Console()
+SAFE_AUTO_FIX_PREFIXES = {
+    "annotate",
+    "apply",
+    "label",
+    "patch",
+    "rollout restart",
+    "scale",
+    "set image",
+    "set resources",
+}
+RISKY_AUTO_FIX_VERBS = {"delete", "drain", "replace"}
+
+
+def _command_action_signature(command: str) -> str:
+    """Return a normalized kubectl action signature from command text."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return ""
+
+    if len(parts) < 2 or parts[0] != "kubectl":
+        return ""
+
+    if len(parts) >= 3 and parts[1] == "rollout" and parts[2] == "restart":
+        return "rollout restart"
+    if len(parts) >= 3 and parts[1] == "set" and parts[2] in {"image", "resources"}:
+        return f"set {parts[2]}"
+    return parts[1]
+
+
+def _is_risky_command(command: str) -> bool:
+    """Return True for potentially destructive kubectl commands."""
+    return _command_action_signature(command) in RISKY_AUTO_FIX_VERBS
+
+
+def _is_safe_auto_fix_command(command: str) -> bool:
+    """Return True when command is in the safe auto-fix allowlist."""
+    return _command_action_signature(command) in SAFE_AUTO_FIX_PREFIXES
 
 
 def stream_diagnosis(
@@ -102,7 +139,10 @@ def extract_kubectl_commands(diagnosis: str) -> List[str]:
 
 
 def apply_fixes(
-    commands: List[str], auto_yes: bool = False, dry_run: bool = False
+    commands: List[str],
+    auto_yes: bool = False,
+    dry_run: bool = False,
+    policy: str = "review",
 ) -> None:
     """Apply kubectl fix commands with user confirmation.
 
@@ -110,14 +150,22 @@ def apply_fixes(
         commands: List of kubectl commands to execute.
         auto_yes: If True, skip confirmation prompts.
         dry_run: If True, only show commands without executing.
+        policy: Auto-fix safety policy (off, review, safe).
     """
     if not commands:
         console.print("[yellow]No kubectl commands found in diagnosis.[/yellow]")
+        return
+    if policy not in {"off", "review", "safe"}:
+        console.print(f"[red]Invalid auto-fix policy '{policy}'.[/red]")
         return
 
     console.print("\n[bold cyan]Found the following fix commands:[/bold cyan]")
     for i, cmd in enumerate(commands, 1):
         console.print(f"  {i}. [green]{cmd}[/green]")
+
+    if policy == "off":
+        console.print("\n[yellow]Auto-fix policy is 'off'; commands were not executed.[/yellow]")
+        return
 
     if dry_run:
         console.print("\n[yellow]Dry run mode - commands not executed.[/yellow]")
@@ -132,9 +180,18 @@ def apply_fixes(
         apply_all = auto_yes
 
     for i, cmd in enumerate(commands, 1):
+        if policy == "safe" and not _is_safe_auto_fix_command(cmd):
+            console.print(f"[yellow]Skipped command {i} (blocked by safe policy).[/yellow]")
+            continue
+
+        is_risky = _is_risky_command(cmd)
+
         # Individual confirmation if not applying all
-        if not apply_all and not auto_yes:
-            if not Confirm.ask(f"Execute command {i}?", default=False):
+        if (not apply_all and not auto_yes) or (is_risky and not auto_yes):
+            prompt = f"Execute command {i}?"
+            if is_risky:
+                prompt = f"Command {i} may be destructive. Execute anyway?"
+            if not Confirm.ask(prompt, default=False):
                 console.print(f"[yellow]Skipped command {i}[/yellow]")
                 continue
 
@@ -251,7 +308,7 @@ def get_diagnostician(model: str = "sonnet") -> Diagnostician:
         return Diagnostician(api_key, model=model)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 def _diagnose_resource(
@@ -261,10 +318,10 @@ def _diagnose_resource(
     gather_fn: Callable[[], Dict[str, str]],
     diagnose_fn: Callable[..., Any],
     diagnostician: Diagnostician,
-    kubectl: Kubectl,
     output_format: str = "rich",
     auto_fix: bool = False,
     yes: bool = False,
+    auto_fix_policy: str = "review",
 ) -> None:
     """Generic diagnosis flow for any Kubernetes resource.
 
@@ -275,10 +332,10 @@ def _diagnose_resource(
         gather_fn: Callable that gathers diagnostics (no args, already bound).
         diagnose_fn: Diagnostician method to call (e.g. diagnostician.diagnose_pod).
         diagnostician: Diagnostician instance.
-        kubectl: Kubectl instance.
         output_format: Output format (rich or json).
         auto_fix: If True, automatically apply suggested fixes.
         yes: If True, skip confirmation prompts for fixes.
+        auto_fix_policy: Auto-fix safety policy (off, review, safe).
     """
     # Gather diagnostics
     label = f"{resource_type} '{resource_name}'"
@@ -287,7 +344,7 @@ def _diagnose_resource(
             diagnostics = gather_fn()
         except KubectlError as e:
             console.print(f"[red]Error: {e}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
     # Analyze with AI
     try:
@@ -317,7 +374,7 @@ def _diagnose_resource(
 
             if auto_fix:
                 commands = extract_kubectl_commands(diagnosis)
-                apply_fixes(commands, auto_yes=yes)
+                apply_fixes(commands, auto_yes=yes, policy=auto_fix_policy)
 
     except typer.Exit:
         raise
@@ -333,7 +390,7 @@ def _diagnose_resource(
             print(json.dumps(error_output, indent=2))
         else:
             console.print(f"[red]Error: Failed to get AI diagnosis: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
 
 
 def _check_cluster(kubectl: Kubectl) -> None:
@@ -379,11 +436,16 @@ def diagnose_pod(
     ),
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
+    auto_fix_policy: str = typer.Option(
+        "review",
+        "--auto-fix-policy",
+        help="Auto-fix safety policy: off, review, safe",
+    ),
 ) -> None:
     """Diagnose a pod issue."""
     kubectl = Kubectl(use_cache=not no_cache, context=context)
-    _check_cluster(kubectl)
     diagnostician = get_diagnostician(model=model)
+    _check_cluster(kubectl)
     _diagnose_resource(
         resource_type="pod",
         resource_name=pod_name,
@@ -391,10 +453,10 @@ def diagnose_pod(
         gather_fn=lambda: kubectl.gather_pod_diagnostics(pod_name, namespace),
         diagnose_fn=diagnostician.diagnose_pod,
         diagnostician=diagnostician,
-        kubectl=kubectl,
         output_format=output_format,
         auto_fix=auto_fix,
         yes=yes,
+        auto_fix_policy=auto_fix_policy,
     )
 
 
@@ -409,11 +471,16 @@ def diagnose_node(
     ),
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
+    auto_fix_policy: str = typer.Option(
+        "review",
+        "--auto-fix-policy",
+        help="Auto-fix safety policy: off, review, safe",
+    ),
 ) -> None:
     """Diagnose a node issue."""
     kubectl = Kubectl(use_cache=not no_cache, context=context)
-    _check_cluster(kubectl)
     diagnostician = get_diagnostician(model=model)
+    _check_cluster(kubectl)
     _diagnose_resource(
         resource_type="node",
         resource_name=node_name,
@@ -421,10 +488,10 @@ def diagnose_node(
         gather_fn=lambda: kubectl.gather_node_diagnostics(node_name),
         diagnose_fn=diagnostician.diagnose_node,
         diagnostician=diagnostician,
-        kubectl=kubectl,
         output_format=output_format,
         auto_fix=auto_fix,
         yes=yes,
+        auto_fix_policy=auto_fix_policy,
     )
 
 
@@ -440,11 +507,16 @@ def diagnose_deployment(
     ),
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
+    auto_fix_policy: str = typer.Option(
+        "review",
+        "--auto-fix-policy",
+        help="Auto-fix safety policy: off, review, safe",
+    ),
 ) -> None:
     """Diagnose a deployment issue."""
     kubectl = Kubectl(use_cache=not no_cache, context=context)
-    _check_cluster(kubectl)
     diagnostician = get_diagnostician(model=model)
+    _check_cluster(kubectl)
     _diagnose_resource(
         resource_type="deployment",
         resource_name=deployment_name,
@@ -452,10 +524,10 @@ def diagnose_deployment(
         gather_fn=lambda: kubectl.gather_deployment_diagnostics(deployment_name, namespace),
         diagnose_fn=diagnostician.diagnose_deployment,
         diagnostician=diagnostician,
-        kubectl=kubectl,
         output_format=output_format,
         auto_fix=auto_fix,
         yes=yes,
+        auto_fix_policy=auto_fix_policy,
     )
 
 
@@ -471,11 +543,16 @@ def diagnose_service(
     ),
     auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
+    auto_fix_policy: str = typer.Option(
+        "review",
+        "--auto-fix-policy",
+        help="Auto-fix safety policy: off, review, safe",
+    ),
 ) -> None:
     """Diagnose a service issue."""
     kubectl = Kubectl(use_cache=not no_cache, context=context)
-    _check_cluster(kubectl)
     diagnostician = get_diagnostician(model=model)
+    _check_cluster(kubectl)
     _diagnose_resource(
         resource_type="service",
         resource_name=service_name,
@@ -483,10 +560,10 @@ def diagnose_service(
         gather_fn=lambda: kubectl.gather_service_diagnostics(service_name, namespace),
         diagnose_fn=diagnostician.diagnose_service,
         diagnostician=diagnostician,
-        kubectl=kubectl,
         output_format=output_format,
         auto_fix=auto_fix,
         yes=yes,
+        auto_fix_policy=auto_fix_policy,
     )
 
 
@@ -581,10 +658,7 @@ def scan(
 
         try:
             # Gather diagnostics
-            if kind == "node":
-                diagnostics = gather_fn(name)
-            else:
-                diagnostics = gather_fn(name, ns)
+            diagnostics = gather_fn(name) if kind == "node" else gather_fn(name, ns)
 
             # Get AI diagnosis (non-streaming for scan)
             diagnosis = diagnose_fn(name, diagnostics, stream=False)
@@ -644,7 +718,7 @@ def explain(
             explanation = diagnostician.explain_error(error)
         except Exception as e:
             console.print(f"[red]Error: Failed to get explanation: {e}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from e
 
     console.print()
     console.print(

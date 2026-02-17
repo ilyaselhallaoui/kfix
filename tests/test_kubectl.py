@@ -25,6 +25,17 @@ class TestKubectl:
         kubectl = Kubectl()
         assert kubectl.check_cluster_access() is False
 
+    def test_check_cluster_access_failure_nonzero_exit(self, mocker):
+        """Test failed cluster access check on non-zero exit code."""
+        mock_result = Mock()
+        mock_result.stdout = ""
+        mock_result.stderr = "connection refused"
+        mock_result.returncode = 1
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        kubectl = Kubectl()
+        assert kubectl.check_cluster_access() is False
+
     def test_get_pod_logs_success(self, mock_subprocess_success):
         """Test getting pod logs successfully."""
         kubectl = Kubectl()
@@ -338,6 +349,52 @@ class TestScanNamespace:
         results = kubectl.scan_namespace("default")
 
         assert len(results) == 0
+
+    def test_scan_namespace_unhealthy_service(self, mocker):
+        """Test scanning namespace finds services without ready endpoints."""
+        pods_json = json.dumps({"items": []})
+        deployments_json = json.dumps({"items": []})
+        services_json = json.dumps({
+            "items": [
+                {
+                    "metadata": {"name": "api"},
+                    "spec": {"type": "ClusterIP", "selector": {"app": "api"}},
+                }
+            ]
+        })
+        endpoints_json = json.dumps({
+            "items": [{"metadata": {"name": "api"}, "subsets": []}]
+        })
+        nodes_json = json.dumps({"items": []})
+
+        def mock_run(args, **kwargs):
+            mock_result = Mock()
+            mock_result.returncode = 0
+            mock_result.stderr = ""
+            cmd = " ".join(args)
+            if "get pods" in cmd:
+                mock_result.stdout = pods_json
+            elif "get deployments" in cmd:
+                mock_result.stdout = deployments_json
+            elif "get services" in cmd:
+                mock_result.stdout = services_json
+            elif "get endpoints" in cmd:
+                mock_result.stdout = endpoints_json
+            elif "get nodes" in cmd:
+                mock_result.stdout = nodes_json
+            else:
+                mock_result.stdout = ""
+            return mock_result
+
+        mocker.patch("subprocess.run", side_effect=mock_run)
+
+        kubectl = Kubectl(use_cache=False)
+        results = kubectl.scan_namespace("default")
+
+        service_results = [r for r in results if r["kind"] == "service"]
+        assert len(service_results) == 1
+        assert service_results[0]["name"] == "api"
+        assert service_results[0]["reason"] == "No ready endpoints"
 
     def test_pod_failure_reason_waiting(self):
         """Test extracting failure reason from waiting container."""

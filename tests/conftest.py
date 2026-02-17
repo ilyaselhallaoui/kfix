@@ -1,6 +1,5 @@
 """Pytest configuration and fixtures."""
 
-import subprocess
 from unittest.mock import Mock
 
 import pytest

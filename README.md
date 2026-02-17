@@ -76,7 +76,7 @@ kfix explain "ImagePullBackOff"
 
 ### Code Quality
 
-- 🧪 **100% Test Coverage** - Comprehensive unit and integration tests
+- 🧪 **Comprehensive Test Coverage** - Unit tests across CLI, kubectl wrapper, AI integration, and config
 - 🔒 **Type Safe** - Full type hints with mypy validation
 - 📝 **Well Documented** - Google-style docstrings throughout
 - ✨ **Code Quality** - Black, isort, ruff for consistent formatting
@@ -210,10 +210,13 @@ kfix diagnose node <name> [--context ctx]                       # Diagnose a nod
 kfix diagnose deployment <name> [-n namespace] [--context ctx]  # Diagnose a deployment
 kfix diagnose service <name> [-n namespace] [--context ctx]     # Diagnose a service
 
-# Scan for all broken resources
+# Scan for unhealthy resources (pods, deployments, services, nodes)
 kfix scan [-n namespace]                        # Scan a namespace
 kfix scan --all-namespaces                      # Scan everything
 kfix scan --context my-cluster                  # Scan a specific cluster
+
+# Diagnose and auto-apply fixes with safety policy
+kfix diagnose pod my-app -n production --auto-fix --auto-fix-policy safe
 
 # Explain errors
 kfix explain "<error>"                          # Explain any K8s error
@@ -352,6 +355,23 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 - [ ] PVC/Storage diagnosis
 - [ ] Network connectivity diagnosis
 - [ ] Web dashboard
+
+## Monetization
+
+See `MONETIZATION.md` for pricing model, tier packaging, and GTM priorities.
+
+Current direction:
+- `Free`: fully useful OSS CLI for individuals
+- `Pro`: power-user capabilities for individual operators
+- `Team`: shared workflows, approvals, integrations, and auditability
+- `Enterprise`: SSO/RBAC, private deployment, compliance, and SLA
+
+## Data & Privacy
+
+- `kfix` sends diagnostic context to Anthropic APIs to generate analysis.
+- Do not include secrets in Kubernetes object metadata/logs sent for diagnosis.
+- API keys are stored locally in `~/.kfix/config.yaml` with restrictive permissions where supported.
+- For stricter requirements, prefer enterprise/private deployment patterns described in `MONETIZATION.md`.
 
 ## License
 

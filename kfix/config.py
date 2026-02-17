@@ -1,8 +1,9 @@
 """Configuration management for kfix."""
 
 import os
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -29,7 +30,24 @@ class Config:
 
         The directory is created with default permissions (0o755).
         """
-        self.config_dir.mkdir(exist_ok=True)
+        self.config_dir.mkdir(mode=0o700, exist_ok=True)
+        with suppress(OSError):
+            os.chmod(self.config_dir, 0o700)
+
+    def _write_config(self, config: Dict[str, Any]) -> None:
+        """Write config with restrictive file permissions when possible."""
+        payload = yaml.safe_dump(config, default_flow_style=False)
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        try:
+            fd = os.open(self.config_file, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+        except OSError:
+            with open(self.config_file, "w", encoding="utf-8") as f:
+                f.write(payload)
+            with suppress(OSError):
+                os.chmod(self.config_file, 0o600)
 
     def get_api_key(self) -> Optional[str]:
         """Get the Anthropic API key from config or environment.
@@ -53,7 +71,7 @@ class Config:
 
         # Check config file
         if self.config_file.exists():
-            with open(self.config_file) as f:
+            with open(self.config_file, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
                 return config.get("api_key")
 
@@ -69,15 +87,13 @@ class Config:
             >>> config = Config()
             >>> config.set_api_key("sk-ant-api03-...")
         """
-        config = {}
+        config: Dict[str, Any] = {}
         if self.config_file.exists():
-            with open(self.config_file) as f:
+            with open(self.config_file, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
 
         config["api_key"] = api_key
-
-        with open(self.config_file, "w") as f:
-            yaml.dump(config, f)
+        self._write_config(config)
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a configuration value.
@@ -96,7 +112,7 @@ class Config:
         if not self.config_file.exists():
             return default
 
-        with open(self.config_file) as f:
+        with open(self.config_file, encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
             return config.get(key, default)
 
@@ -111,12 +127,10 @@ class Config:
             >>> config = Config()
             >>> config.set("timeout", 60)
         """
-        config = {}
+        config: Dict[str, Any] = {}
         if self.config_file.exists():
-            with open(self.config_file) as f:
+            with open(self.config_file, encoding="utf-8") as f:
                 config = yaml.safe_load(f) or {}
 
         config[key] = value
-
-        with open(self.config_file, "w") as f:
-            yaml.dump(config, f)
+        self._write_config(config)

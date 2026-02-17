@@ -1,16 +1,16 @@
 """AI-powered diagnosis using Claude."""
 
-from typing import Dict, Iterator, Optional, Tuple, NamedTuple, Union
+import logging
+from typing import Any, Dict, Iterator, NamedTuple, Optional, Union, cast
 
-from anthropic import Anthropic, APIError, RateLimitError, APITimeoutError
+from anthropic import Anthropic, APIError, APITimeoutError, RateLimitError
 from tenacity import (
+    before_sleep_log,
     retry,
+    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log,
 )
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -187,21 +187,33 @@ Keep your response under 300 words. Be specific and actionable.""",
         """
         if stream:
             return self._stream_response(prompt)
-        else:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
-            )
 
-            # Track token usage
-            self.last_token_usage = TokenUsage(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-                model=self.model,
-            )
+        response = self.client.messages.create(
+            model=self.model,
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}],
+        )
 
-            return response.content[0].text
+        # Track token usage
+        self.last_token_usage = TokenUsage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            model=self.model,
+        )
+
+        return self._extract_text_response(response.content)
+
+    @staticmethod
+    def _extract_text_response(content: Any) -> str:
+        """Extract text from Anthropic content blocks."""
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if hasattr(block, "text") and isinstance(block.text, str):
+                    parts.append(block.text)
+            if parts:
+                return "\n".join(parts)
+        return ""
 
     def _diagnose(
         self,
@@ -241,18 +253,18 @@ Keep your response under 300 words. Be specific and actionable.""",
         # Make API call with retry logic
         try:
             return self._make_api_call(prompt, stream=stream)
-        except RateLimitError:
+        except RateLimitError as e:
             raise Exception(
                 "Rate limit exceeded. Please wait a moment and try again. "
                 "Consider using a different model with --model flag."
-            )
-        except APITimeoutError:
+            ) from e
+        except APITimeoutError as e:
             raise Exception(
                 "API request timed out after multiple attempts. "
                 "Please check your internet connection and try again."
-            )
+            ) from e
         except APIError as e:
-            raise Exception(f"API error: {e}. Please try again later.")
+            raise Exception(f"API error: {e}. Please try again later.") from e
 
     def _stream_response(self, prompt: str) -> Iterator[str]:
         """Stream response from Claude API.
@@ -268,8 +280,7 @@ Keep your response under 300 words. Be specific and actionable.""",
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
-            for text in stream.text_stream:
-                yield text
+            yield from stream.text_stream
 
             # Get final message to track token usage
             final_message = stream.get_final_message()
@@ -422,19 +433,19 @@ Provide:
 Keep your response under 300 words. Be clear and actionable."""
 
         try:
-            return self._make_api_call(prompt, stream=False)
-        except RateLimitError:
+            return cast(str, self._make_api_call(prompt, stream=False))
+        except RateLimitError as e:
             raise Exception(
                 "Rate limit exceeded. Please wait a moment and try again. "
                 "Consider using a different model with --model flag."
-            )
-        except APITimeoutError:
+            ) from e
+        except APITimeoutError as e:
             raise Exception(
                 "API request timed out after multiple attempts. "
                 "Please check your internet connection and try again."
-            )
+            ) from e
         except APIError as e:
-            raise Exception(f"API error: {e}. Please try again later.")
+            raise Exception(f"API error: {e}. Please try again later.") from e
 
     def get_token_usage(self) -> Optional[TokenUsage]:
         """Get token usage from the last API call.

@@ -51,7 +51,7 @@ dev = [
     "black>=24.0.0",
     "ruff>=0.1.0",
     "isort>=5.13.0",
-    "mypy>=1.8.0",
+    "mypy>=1.8.0,<1.16.0",
     "pre-commit>=3.6.0",
     "types-PyYAML>=6.0.0",
 ]
@@ -80,6 +80,8 @@ extend-exclude = '''
 [tool.ruff]
 line-length = 100
 target-version = "py38"
+
+[tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
     "W",   # pycodestyle warnings
@@ -116,7 +118,7 @@ ensure_newline_before_comments = true
 
 # mypy configuration
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
