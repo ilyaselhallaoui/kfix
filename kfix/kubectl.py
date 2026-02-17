@@ -1,7 +1,8 @@
 """Kubectl wrapper for gathering Kubernetes diagnostics."""
 
 import subprocess
-from typing import Dict, Tuple
+import time
+from typing import Dict, Tuple, Optional
 
 
 class KubectlError(Exception):
@@ -15,7 +16,71 @@ class Kubectl:
 
     This class provides methods to gather diagnostic information from
     Kubernetes resources using kubectl commands.
+
+    Attributes:
+        cache_ttl: Time-to-live for cache entries in seconds (default: 300 = 5 minutes).
+        use_cache: Whether to use caching (default: True).
     """
+
+    def __init__(self, cache_ttl: int = 300, use_cache: bool = True) -> None:
+        """Initialize Kubectl wrapper.
+
+        Args:
+            cache_ttl: Time-to-live for cache entries in seconds.
+            use_cache: Whether to enable caching.
+        """
+        self.cache_ttl = cache_ttl
+        self.use_cache = use_cache
+        self._cache: Dict[str, Tuple[float, str, str, int]] = {}
+
+    def _cache_key(self, args: list[str]) -> str:
+        """Generate cache key from kubectl arguments.
+
+        Args:
+            args: kubectl command arguments.
+
+        Returns:
+            Cache key string.
+        """
+        return "|".join(args)
+
+    def _get_cached(self, args: list[str]) -> Optional[Tuple[str, str, int]]:
+        """Get cached result if available and not expired.
+
+        Args:
+            args: kubectl command arguments.
+
+        Returns:
+            Cached result tuple (stdout, stderr, returncode) or None if not cached/expired.
+        """
+        if not self.use_cache:
+            return None
+
+        key = self._cache_key(args)
+        if key in self._cache:
+            timestamp, stdout, stderr, returncode = self._cache[key]
+            if time.time() - timestamp < self.cache_ttl:
+                return stdout, stderr, returncode
+
+        return None
+
+    def _set_cached(self, args: list[str], result: Tuple[str, str, int]) -> None:
+        """Store result in cache.
+
+        Args:
+            args: kubectl command arguments.
+            result: Result tuple (stdout, stderr, returncode) to cache.
+        """
+        if not self.use_cache:
+            return
+
+        key = self._cache_key(args)
+        stdout, stderr, returncode = result
+        self._cache[key] = (time.time(), stdout, stderr, returncode)
+
+    def clear_cache(self) -> None:
+        """Clear all cached results."""
+        self._cache.clear()
 
     def _run(self, args: list[str], check: bool = True) -> Tuple[str, str, int]:
         """Run a kubectl command and return its output.
@@ -34,11 +99,22 @@ class Kubectl:
             >>> kubectl = Kubectl()
             >>> stdout, stderr, code = kubectl._run(["get", "pods"])
         """
+        # Check cache first
+        cached_result = self._get_cached(args)
+        if cached_result is not None:
+            return cached_result
+
+        # Execute command
         try:
             result = subprocess.run(["kubectl"] + args, capture_output=True, text=True, timeout=30)
+            output = (result.stdout, result.stderr, result.returncode)
+
+            # Cache the result
+            self._set_cached(args, output)
+
             if check and result.returncode != 0:
                 raise KubectlError(f"kubectl failed: {result.stderr}")
-            return result.stdout, result.stderr, result.returncode
+            return output
         except subprocess.TimeoutExpired:
             raise KubectlError("kubectl command timed out")
         except FileNotFoundError:
