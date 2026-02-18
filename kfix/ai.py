@@ -38,9 +38,9 @@ class TokenUsage(NamedTuple):
         Returns:
             Estimated cost in dollars.
         """
-        # Pricing per million tokens (as of Jan 2025)
+        # Pricing per million tokens
         pricing = {
-            "claude-sonnet-4-5-20250929": {"input": 3.0, "output": 15.0},
+            "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
             "claude-opus-4-6": {"input": 15.0, "output": 75.0},
             "claude-haiku-4-5-20251001": {"input": 0.25, "output": 1.25},
         }
@@ -68,12 +68,32 @@ class Diagnostician:
 
     # Model ID mappings
     MODELS = {
-        "sonnet": "claude-sonnet-4-5-20250929",
+        "sonnet": "claude-sonnet-4-6",
         "opus": "claude-opus-4-6",
         "haiku": "claude-haiku-4-5-20251001",
     }
 
     # Prompt templates for different resource types
+    _FORMATTING_RULES = """
+FORMATTING RULES (follow exactly):
+- Use **Bold** for section labels, never use # or ## markdown headers
+- Use ```bash code blocks for all kubectl/shell commands
+- Keep each section concise — total response under 400 words
+- Structure your response with exactly these four sections:
+
+**Diagnosis**
+[2-3 sentence diagnosis]
+
+**Root Cause**
+[1-2 sentence root cause]
+
+**Fix**
+[numbered steps, with commands in ```bash blocks]
+
+**Documentation**
+[1-2 relevant URLs, plain text]
+"""
+
     _PROMPT_TEMPLATES = {
         "pod": """You are a Kubernetes expert. Analyze the following diagnostics for pod '{resource_name}' and provide a concise diagnosis.
 
@@ -85,14 +105,7 @@ POD LOGS (last 100 lines):
 
 EVENTS:
 {events}
-
-Provide:
-1. A clear diagnosis of the issue (2-3 sentences)
-2. The root cause
-3. A specific fix with copy-paste ready kubectl commands
-4. A link to relevant Kubernetes documentation
-
-Keep your response under 300 words. Be specific and actionable.""",
+{formatting_rules}""",
         "node": """You are a Kubernetes expert. Analyze the following diagnostics for node '{resource_name}' and provide a concise diagnosis.
 
 NODE DESCRIPTION:
@@ -100,14 +113,7 @@ NODE DESCRIPTION:
 
 EVENTS:
 {events}
-
-Provide:
-1. A clear diagnosis of the issue (2-3 sentences)
-2. The root cause
-3. A specific fix with copy-paste ready kubectl commands or system commands
-4. A link to relevant Kubernetes documentation
-
-Keep your response under 300 words. Be specific and actionable.""",
+{formatting_rules}""",
         "deployment": """You are a Kubernetes expert. Analyze the following diagnostics for deployment '{resource_name}' and provide a concise diagnosis.
 
 DEPLOYMENT DESCRIPTION:
@@ -115,29 +121,15 @@ DEPLOYMENT DESCRIPTION:
 
 EVENTS:
 {events}
-
-Provide:
-1. A clear diagnosis of the issue (2-3 sentences)
-2. The root cause
-3. A specific fix with copy-paste ready kubectl commands
-4. A link to relevant Kubernetes documentation
-
-Keep your response under 300 words. Be specific and actionable.""",
-        "service": """You are a Kubernetes expert. Analyze the following diagnostics for service '{resource_name}' and provide a concise diagnosis.
+{formatting_rules}""",
+        "service": """You are a Kubernetes expert. Analyze the following diagnostics for service '{resource_name}' and provide a concise diagnosis. Focus on selector mismatches, missing endpoints, and port misconfigurations.
 
 SERVICE DESCRIPTION:
 {describe}
 
 SERVICE ENDPOINTS:
 {endpoints}
-
-Provide:
-1. A clear diagnosis of the issue (2-3 sentences)
-2. The root cause (focus on connectivity, selectors, ports)
-3. A specific fix with copy-paste ready kubectl commands
-4. A link to relevant Kubernetes documentation
-
-Keep your response under 300 words. Be specific and actionable.""",
+{formatting_rules}""",
     }
 
     def __init__(self, api_key: str, model: str = "sonnet") -> None:
@@ -190,7 +182,7 @@ Keep your response under 300 words. Be specific and actionable.""",
 
         response = self.client.messages.create(
             model=self.model,
-            max_tokens=1024,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         )
 
@@ -248,7 +240,11 @@ Keep your response under 300 words. Be specific and actionable.""",
 
         # Format the prompt template with diagnostics data
         template = self._PROMPT_TEMPLATES[resource_type]
-        prompt = template.format(resource_name=resource_name, **diagnostics)
+        prompt = template.format(
+            resource_name=resource_name,
+            formatting_rules=self._FORMATTING_RULES,
+            **diagnostics,
+        )
 
         # Make API call with retry logic
         try:
@@ -277,7 +273,7 @@ Keep your response under 300 words. Be specific and actionable.""",
         """
         with self.client.messages.stream(
             model=self.model,
-            max_tokens=1024,
+            max_tokens=1500,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:
             yield from stream.text_stream

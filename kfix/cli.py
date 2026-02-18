@@ -4,8 +4,10 @@ import json
 import re
 import shlex
 import subprocess
+import sys
+import time
 from datetime import datetime
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 import typer
 from rich.console import Console
@@ -299,10 +301,37 @@ def get_diagnostician(model: str = "sonnet") -> Diagnostician:
     api_key = config.get_api_key()
 
     if not api_key:
-        console.print("[red]Error: No API key configured.[/red]")
-        console.print("\nSet your Anthropic API key with:")
-        console.print("  [cyan]kfix config set api-key YOUR_API_KEY[/cyan]")
-        raise typer.Exit(1)
+        if sys.stdout.isatty():
+            console.print()
+            console.print(
+                Panel(
+                    "[bold]Welcome to kfix![/bold]\n\n"
+                    "To get started, you need a free Anthropic API key.\n\n"
+                    "  1. Visit [link=https://console.anthropic.com]console.anthropic.com[/link]\n"
+                    "  2. Sign up (free) and go to [bold]API Keys[/bold]\n"
+                    "  3. Create a new key and paste it below\n\n"
+                    "[dim]Your key will be saved to ~/.kfix/config.yaml[/dim]",
+                    title="[bold cyan]Setup Required[/bold cyan]",
+                    border_style="cyan",
+                    padding=(1, 2),
+                )
+            )
+            api_key = typer.prompt(
+                "  Anthropic API key",
+                hide_input=True,
+                prompt_suffix=" › ",
+            ).strip()
+            if api_key:
+                config.set_api_key(api_key)
+                console.print("[green]  ✓ API key saved — you're all set![/green]\n")
+            else:
+                console.print("[red]No API key provided. Exiting.[/red]")
+                raise typer.Exit(1)
+        else:
+            console.print("[red]Error: No API key configured.[/red]")
+            console.print("Set it with:  kfix config set api-key YOUR_KEY")
+            console.print("Or export:    ANTHROPIC_API_KEY=YOUR_KEY")
+            raise typer.Exit(1)
 
     try:
         return Diagnostician(api_key, model=model)
@@ -367,7 +396,7 @@ def _diagnose_resource(
                 )
             else:
                 diagnosis_stream = diagnose_fn(resource_name, diagnostics, stream=True)
-                stream_diagnosis(diagnosis_stream, resource_type, resource_name)
+                diagnosis = stream_diagnosis(diagnosis_stream, resource_type, resource_name)
 
             token_usage = diagnostician.get_token_usage()
             display_token_usage(token_usage)
@@ -375,6 +404,18 @@ def _diagnose_resource(
             if auto_fix:
                 commands = extract_kubectl_commands(diagnosis)
                 apply_fixes(commands, auto_yes=yes, policy=auto_fix_policy)
+
+        # Save to history (best-effort)
+        try:
+            Config().save_to_history(
+                resource_type=resource_type,
+                resource_name=resource_name,
+                namespace=namespace,
+                diagnosis=diagnosis,
+                model=diagnostician.model_name,
+            )
+        except Exception:
+            pass
 
     except typer.Exit:
         raise
@@ -609,10 +650,10 @@ def scan(
     # Display summary table
     if output_format != "json":
         table = Table(title="Unhealthy Resources", border_style="red")
-        table.add_column("Kind", style="cyan")
-        table.add_column("Name", style="bold")
-        table.add_column("Namespace", style="dim")
-        table.add_column("Status", style="yellow")
+        table.add_column("Kind", style="cyan", no_wrap=True)
+        table.add_column("Name", style="bold", min_width=30, overflow="fold")
+        table.add_column("Namespace", style="dim", no_wrap=True)
+        table.add_column("Status", style="yellow", no_wrap=True)
         table.add_column("Reason", style="red")
 
         for r in unhealthy:
@@ -697,6 +738,114 @@ def scan(
         print(json.dumps({"resources": results, "total": len(unhealthy)}, indent=2))
 
 
+@app.command("watch")
+def watch(
+    namespace: Optional[str] = typer.Option(
+        None, "-n", "--namespace", help="Namespace to watch (default: default)"
+    ),
+    all_namespaces: bool = typer.Option(
+        False, "-A", "--all-namespaces", help="Watch all namespaces"
+    ),
+    context: Optional[str] = typer.Option(None, "--context", help="Kubernetes context to use"),
+    interval: int = typer.Option(30, "--interval", help="Scan interval in seconds"),
+) -> None:
+    """Continuously monitor for unhealthy resources. Press Ctrl+C to stop.
+
+    Example:
+        $ kfix watch -n production
+        $ kfix watch --all-namespaces --interval 60
+    """
+    kubectl = Kubectl(context=context, use_cache=False)
+    _check_cluster(kubectl)
+
+    known_keys: Set[Tuple[str, str, Optional[str]]] = set()
+    first_run = True
+
+    console.print(
+        f"[bold cyan]kfix watch[/bold cyan] — scanning every [bold]{interval}s[/bold]. "
+        "Press [bold]Ctrl+C[/bold] to stop.\n"
+    )
+
+    try:
+        while True:
+            scan_time = datetime.now().strftime("%H:%M:%S")
+
+            if all_namespaces:
+                unhealthy = kubectl.scan_all_namespaces()
+            else:
+                ns = namespace or "default"
+                unhealthy = kubectl.scan_namespace(ns)
+
+            current_keys: Set[Tuple[str, str, Optional[str]]] = {
+                (r["kind"], r["name"], r["namespace"]) for r in unhealthy
+            }
+            new_keys = current_keys - known_keys
+            resolved_keys = known_keys - current_keys
+
+            # Build table
+            table = Table(
+                title=f"Unhealthy Resources  [{scan_time}]",
+                border_style="red" if unhealthy else "green",
+                show_lines=False,
+            )
+            table.add_column("Kind", style="cyan", no_wrap=True)
+            table.add_column("Name", style="bold", min_width=30, overflow="fold")
+            table.add_column("Namespace", style="dim", no_wrap=True)
+            table.add_column("Status", style="yellow", no_wrap=True)
+            table.add_column("Reason", style="red")
+
+            for r in unhealthy:
+                key = (r["kind"], r["name"], r["namespace"])
+                name_display = (
+                    f"[bold green]{r['name']} ✦[/bold green]"
+                    if key in new_keys
+                    else r["name"]
+                )
+                table.add_row(
+                    r["kind"],
+                    name_display,
+                    r["namespace"] or "-",
+                    r["status"],
+                    r["reason"],
+                )
+
+            console.clear()
+            if unhealthy:
+                console.print(table)
+                console.print(
+                    f"\n[bold red]  {len(unhealthy)} unhealthy resource(s)[/bold red]",
+                    end="",
+                )
+            else:
+                console.print(f"[green]  ✓ All resources healthy  [{scan_time}][/green]")
+
+            if not first_run:
+                if new_keys:
+                    console.print(
+                        f"\n\n[bold yellow]  ⚠  {len(new_keys)} new issue(s)![/bold yellow]"
+                    )
+                    for kind, name, ns in sorted(new_keys):
+                        ns_flag = f" -n {ns}" if ns else ""
+                        console.print(
+                            f"     → [cyan]kfix diagnose {kind} {name}{ns_flag}[/cyan]"
+                        )
+                if resolved_keys:
+                    console.print(
+                        f"\n[green]  ✓ {len(resolved_keys)} issue(s) resolved[/green]"
+                    )
+
+            console.print(
+                f"\n[dim]  Next scan in {interval}s — Ctrl+C to stop[/dim]"
+            )
+
+            known_keys = current_keys
+            first_run = False
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        console.print("\n\n[dim]Watch stopped.[/dim]")
+
+
 @app.command("explain")
 def explain(
     error: str = typer.Argument(..., help="Kubernetes error message to explain"),
@@ -728,6 +877,80 @@ def explain(
             border_style="cyan",
         )
     )
+
+
+history_app = typer.Typer(help="Diagnosis history commands")
+app.add_typer(history_app, name="history")
+
+
+@history_app.callback(invoke_without_command=True)
+def history_list(
+    ctx: typer.Context,
+    limit: int = typer.Option(20, "-n", "--limit", help="Number of entries to show"),
+) -> None:
+    """Show recent diagnosis history.
+
+    Example:
+        $ kfix history
+        $ kfix history -n 50
+        $ kfix history clear
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    config = Config()
+    entries = config.get_history(limit=limit)
+
+    if not entries:
+        console.print("[dim]No diagnosis history yet.[/dim]")
+        console.print("Run [cyan]kfix diagnose pod <name>[/cyan] to create your first entry.")
+        return
+
+    table = Table(title=f"Diagnosis History (last {len(entries)})", border_style="cyan")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Time", style="dim", no_wrap=True)
+    table.add_column("Resource", style="cyan", no_wrap=True)
+    table.add_column("Name", style="bold", min_width=20, overflow="fold")
+    table.add_column("Namespace", style="dim")
+    table.add_column("Model", style="dim")
+
+    for i, entry in enumerate(entries, 1):
+        # Parse timestamp
+        try:
+            ts = datetime.fromisoformat(entry["timestamp"].rstrip("Z"))
+            time_str = ts.strftime("%m-%d %H:%M")
+        except (ValueError, KeyError):
+            time_str = "—"
+
+        table.add_row(
+            str(i),
+            time_str,
+            entry.get("resource_type", "—"),
+            entry.get("resource_name", "—"),
+            entry.get("namespace") or "—",
+            entry.get("model", "—"),
+        )
+
+    console.print()
+    console.print(table)
+    console.print(
+        "\n[dim]Tip: Diagnoses are saved automatically after each kfix diagnose run.[/dim]"
+    )
+
+
+@history_app.command("clear")
+def history_clear(
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation"),
+) -> None:
+    """Clear all diagnosis history."""
+    if not yes:
+        confirmed = Confirm.ask("Clear all diagnosis history?", default=False)
+        if not confirmed:
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit(0)
+
+    Config().clear_history()
+    console.print("[green]✓ History cleared.[/green]")
 
 
 @app.command("version")

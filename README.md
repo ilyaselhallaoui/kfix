@@ -1,6 +1,6 @@
 # kfix
 
-**AI-powered Kubernetes troubleshooter CLI** - Debug pods in 10 seconds instead of 10 minutes.
+**AI-powered Kubernetes troubleshooter CLI** — From `kubectl` noise to a clear fix in seconds.
 
 [![PyPI version](https://badge.fury.io/py/kfix.svg)](https://badge.fury.io/py/kfix)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -9,15 +9,15 @@
 
 ## What is kfix?
 
-kfix is a command-line tool that uses AI to diagnose and fix Kubernetes issues instantly. Instead of manually running `kubectl describe`, checking logs, and searching Stack Overflow, kfix does all that for you and provides:
+kfix is a command-line tool that uses AI to diagnose and fix Kubernetes issues instantly. Instead of manually running `kubectl describe`, digging through logs, and searching Stack Overflow, kfix does all of that and returns an actionable fix in under 10 seconds.
 
-- 🔍 **Instant diagnosis** of pods, nodes, deployments, and services
-- 🤖 **AI-powered analysis** using Claude (Anthropic)
-- 📋 **Copy-paste ready** kubectl fix commands
-- 📚 **Links to relevant** Kubernetes documentation
-- ⚡ **Works with any** kubectl-configured cluster
-- 🧪 **Comprehensive test coverage** for reliability
-- 🎯 **Type-safe** with full type hints
+- **Instant diagnosis** of pods, nodes, deployments, and services
+- **AI-powered analysis** using Anthropic Claude
+- **Copy-paste ready** kubectl fix commands
+- **Cluster scanner** — find every unhealthy resource at once
+- **Continuous watch** — alert on new issues as they appear
+- **Diagnosis history** — every run is saved locally
+- **Works with any** kubectl-configured cluster (EKS, GKE, AKS, k3s, Rancher, ...)
 
 ## Installation
 
@@ -25,369 +25,156 @@ kfix is a command-line tool that uses AI to diagnose and fix Kubernetes issues i
 pip install kfix
 ```
 
+On first run kfix will interactively guide you through API key setup — no manual config step needed.
+
 ## Quick Start
 
-### 1. Configure your API key
-
 ```bash
-# Get your API key from https://console.anthropic.com/
-kfix config set api-key YOUR_ANTHROPIC_API_KEY
-```
-
-### 2. Diagnose resources
-
-```bash
-# Diagnose a pod
+# Diagnose a failing pod
 kfix diagnose pod my-app -n production
 
-# Diagnose a node
-kfix diagnose node worker-node-1
+# Scan all namespaces for unhealthy resources
+kfix scan --all-namespaces
 
-# Diagnose a deployment
-kfix diagnose deployment my-app -n production
+# Watch the cluster continuously (Ctrl+C to stop)
+kfix watch --all-namespaces --interval 30
 
-# Diagnose a service
-kfix diagnose service my-app -n production
-```
+# Explain any Kubernetes error in plain English
+kfix explain "OOMKilled"
 
-### 3. Explain errors
-
-```bash
-kfix explain "CrashLoopBackOff"
-kfix explain "ImagePullBackOff"
-```
-
-## Features
-
-### Core Capabilities
-
-- **Smart Diagnosis**: Analyzes pod status, events, logs, and configuration
-- **Plain English**: No need to be a Kubernetes expert
-- **Actionable Fixes**: Get exact commands to solve the issue
-- **Fast**: 10 seconds instead of 15 minutes of debugging
-- **Cluster Agnostic**: Works with any kubectl-configured cluster (EKS, GKE, AKS, k3s, etc.)
-
-### Resource Types Supported
-
-- ✅ **Pods** - CrashLoopBackOff, ImagePullBackOff, OOMKilled, etc.
-- ✅ **Nodes** - DiskPressure, MemoryPressure, NotReady, etc.
-- ✅ **Deployments** - Rollout issues, replica problems
-- ✅ **Services** - Connectivity issues, endpoint problems
-
-### Code Quality
-
-- 🧪 **Comprehensive Test Coverage** - Unit tests across CLI, kubectl wrapper, AI integration, and config
-- 🔒 **Type Safe** - Full type hints with mypy validation
-- 📝 **Well Documented** - Google-style docstrings throughout
-- ✨ **Code Quality** - Black, isort, ruff for consistent formatting
-- 🔄 **CI/CD** - Automated testing and releases
-
-## Usage Examples
-
-### Pod in CrashLoopBackOff
-
-```bash
-$ kfix diagnose pod broken-app -n production
-
-🔍 Diagnosing pod: broken-app (namespace: production)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-## Problem: ImagePullBackOff
-
-The pod cannot pull the container image 'myapp:v1.2.3-typo'
-because it doesn't exist in the registry.
-
-## Root Cause
-Image tag 'v1.2.3-typo' does not exist in the container registry.
-
-## Fix
-```bash
-kubectl set image pod/broken-app app=myapp:v1.2.3 -n production
-```
-
-## Verification
-```bash
-kubectl get pod broken-app -n production -w
-```
-
-## Documentation
-https://kubernetes.io/docs/concepts/containers/images/
-```
-
-### Deployment Issues
-
-```bash
-$ kfix diagnose deployment my-app -n staging
-
-🔍 Diagnosing deployment: my-app (namespace: staging)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-## Problem: Rollout Stuck
-
-Deployment rollout is stuck with 0/3 replicas available.
-New pods are failing due to insufficient memory.
-
-## Root Cause
-Memory limit (128Mi) is too low for the application startup.
-
-## Fix
-```bash
-kubectl set resources deployment/my-app --limits=memory=512Mi -n staging
-kubectl rollout restart deployment/my-app -n staging
-```
-
-## Verification
-```bash
-kubectl rollout status deployment/my-app -n staging
-```
-```
-
-### Service Connectivity
-
-```bash
-$ kfix diagnose service api -n production
-
-🔍 Diagnosing service: api (namespace: production)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-## Problem: No Endpoints
-
-Service has no endpoints. No pods match the service selector.
-
-## Root Cause
-Service selector `app=api` doesn't match any pod labels.
-Pods have label `app=api-server` instead.
-
-## Fix
-```bash
-kubectl patch service api -n production -p '{"spec":{"selector":{"app":"api-server"}}}'
-```
-
-## Verification
-```bash
-kubectl get endpoints api -n production
-```
-```
-
-### Node Issues
-
-```bash
-$ kfix diagnose node worker-1
-
-🔍 Diagnosing node: worker-1
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-## Status: DiskPressure
-
-Node has insufficient disk space. Current usage: 95%
-
-## Fix
-```bash
-# Drain the node
-kubectl drain worker-1 --ignore-daemonsets
-
-# SSH and clean up
-ssh worker-1 'docker system prune -af'
-
-# Uncordon the node
-kubectl uncordon worker-1
-```
-
-## Documentation
-https://kubernetes.io/docs/concepts/architecture/nodes/
+# Review recent diagnoses
+kfix history
 ```
 
 ## Commands
 
+### `kfix diagnose`
+
 ```bash
-# Diagnose resources
-kfix diagnose pod <name> [-n namespace] [--context ctx]         # Diagnose a pod
-kfix diagnose node <name> [--context ctx]                       # Diagnose a node
-kfix diagnose deployment <name> [-n namespace] [--context ctx]  # Diagnose a deployment
-kfix diagnose service <name> [-n namespace] [--context ctx]     # Diagnose a service
+kfix diagnose pod <name>        [-n ns] [--context ctx] [--model haiku|sonnet|opus]
+kfix diagnose node <name>               [--context ctx]
+kfix diagnose deployment <name> [-n ns] [--context ctx]
+kfix diagnose service <name>    [-n ns] [--context ctx]
 
-# Scan for unhealthy resources (pods, deployments, services, nodes)
-kfix scan [-n namespace]                        # Scan a namespace
-kfix scan --all-namespaces                      # Scan everything
-kfix scan --context my-cluster                  # Scan a specific cluster
+# Auto-apply safe fixes without prompting
+kfix diagnose pod my-app -n prod --auto-fix --auto-fix-policy safe
 
-# Diagnose and auto-apply fixes with safety policy
-kfix diagnose pod my-app -n production --auto-fix --auto-fix-policy safe
-
-# Explain errors
-kfix explain "<error>"                          # Explain any K8s error
-
-# Configuration
-kfix config set api-key <key>                   # Set API key
-
-# Info
-kfix version                                    # Show version
+# Output as JSON (great for CI pipelines)
+kfix diagnose pod my-app -o json | jq .diagnosis
 ```
+
+### `kfix scan`
+
+```bash
+kfix scan                        # Scan default namespace
+kfix scan -n production          # Scan a specific namespace
+kfix scan --all-namespaces       # Scan everything (-A also works)
+kfix scan --context my-cluster   # Scan a specific cluster
+```
+
+Finds all unhealthy pods, deployments, services, and nodes, then diagnoses each one with AI.
+
+### `kfix watch`
+
+```bash
+kfix watch                        # Watch default namespace every 30s
+kfix watch -A --interval 60       # Watch all namespaces every 60s
+kfix watch -n production          # Watch a specific namespace
+```
+
+Continuously polls the cluster. Highlights new issues and suggests the exact `kfix diagnose` command to run.
+
+### `kfix history`
+
+```bash
+kfix history           # List last 20 diagnoses
+kfix history -n 50     # List last 50
+kfix history clear     # Delete all history
+```
+
+Every `kfix diagnose` run is automatically saved to `~/.kfix/history.jsonl`.
+
+### `kfix explain`
+
+```bash
+kfix explain "CrashLoopBackOff"
+kfix explain "ImagePullBackOff"
+kfix explain "OOMKilled: container exceeded memory limit"
+```
+
+### `kfix config set`
+
+```bash
+kfix config set api-key sk-ant-api03-...
+```
+
+Or set the environment variable: `export ANTHROPIC_API_KEY=sk-ant-...`
+
+## Shell Completions
+
+kfix supports tab completion for all shells out of the box:
+
+```bash
+# Install completion (run once)
+kfix --install-completion
+
+# Or view the completion script
+kfix --show-completion
+```
+
+After running `--install-completion`, restart your shell and `kfix <TAB>` will complete commands, flags, and arguments.
 
 ## Requirements
 
 - Python 3.8+
-- kubectl configured with cluster access
-- Anthropic API key ([get one here](https://console.anthropic.com/))
-
-## How It Works
-
-1. kfix runs `kubectl` commands to gather resource information
-2. Sends the data to Claude AI for analysis
-3. Returns a diagnosis with actionable fix commands
-4. All in under 10 seconds
+- `kubectl` installed and configured with cluster access
+- Anthropic API key ([get one free at console.anthropic.com](https://console.anthropic.com/))
 
 ## Why kfix?
 
 **Before kfix:**
 ```bash
-kubectl describe pod my-app              # Read walls of text
-kubectl logs my-app                      # Dig through logs
-# Google "kubernetes crashloopbackoff"
-# Read 5 Stack Overflow threads
-# Try random fixes
-# ⏰ 15 minutes wasted
+kubectl describe pod my-app     # Wall of text
+kubectl logs my-app             # Dig through logs
+# Google the error, read 5 threads...
+# ⏰ 15+ minutes later, maybe fixed
 ```
 
 **After kfix:**
 ```bash
 kfix diagnose pod my-app
-# Get AI diagnosis + exact fix command
-# Copy-paste the fix
-# ✅ 10 seconds total
+# ✅ Root cause + copy-paste fix in 10 seconds
 ```
 
 ## Development
 
-### Setup
-
 ```bash
-# Clone the repository
 git clone https://github.com/ilyaselhallaoui/kfix.git
 cd kfix
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install with dev dependencies
-make install-dev
-
-# Install pre-commit hooks
-pre-commit install
+make install-dev      # Install with dev dependencies
+make test             # Run all tests
+make all              # format + lint + type-check + test
 ```
-
-### Running Tests
-
-```bash
-# Run all tests
-make test
-
-# Run with coverage
-make test-cov
-
-# Run specific test file
-pytest tests/test_kubectl.py
-```
-
-### Code Quality
-
-```bash
-# Format code
-make format
-
-# Lint code
-make lint
-
-# Type check
-make type-check
-
-# Run all checks
-make all
-```
-
-### Project Structure
-
-```
-kfix/
-├── kfix/              # Main package
-│   ├── __init__.py    # Package info
-│   ├── cli.py         # CLI interface with Typer
-│   ├── kubectl.py     # Kubectl wrapper
-│   ├── ai.py          # AI diagnostician
-│   └── config.py      # Configuration management
-├── tests/             # Comprehensive test suite
-│   ├── test_cli.py
-│   ├── test_kubectl.py
-│   ├── test_ai.py
-│   └── test_config.py
-├── .github/           # GitHub Actions workflows
-├── Makefile           # Development commands
-├── pyproject.toml     # Package configuration
-└── README.md          # This file
-```
-
-## Contributing
-
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes with tests
-4. Run `make all` to verify quality
-5. Submit a pull request
 
 ## Roadmap
 
-### Done
 - [x] Auto-fix mode (`--auto-fix`)
 - [x] Cluster scan (`kfix scan`)
 - [x] Multi-cluster support (`--context`)
-
-### Planned
-- [ ] Watch mode (continuous monitoring)
-- [ ] Interactive mode (follow-up questions)
-- [ ] History/logging of diagnoses
-- [ ] PVC/Storage diagnosis
+- [x] Continuous watch (`kfix watch`)
+- [x] Diagnosis history (`kfix history`)
+- [ ] PVC / storage diagnosis
 - [ ] Network connectivity diagnosis
-- [ ] Web dashboard
-
-## Monetization
-
-See `MONETIZATION.md` for pricing model, tier packaging, and GTM priorities.
-
-Current direction:
-- `Free`: fully useful OSS CLI for individuals
-- `Pro`: power-user capabilities for individual operators
-- `Team`: shared workflows, approvals, integrations, and auditability
-- `Enterprise`: SSO/RBAC, private deployment, compliance, and SLA
+- [ ] `kfix watch` desktop/Slack notifications
 
 ## Data & Privacy
 
-- `kfix` sends diagnostic context to Anthropic APIs to generate analysis.
-- Do not include secrets in Kubernetes object metadata/logs sent for diagnosis.
-- API keys are stored locally in `~/.kfix/config.yaml` with restrictive permissions where supported.
-- For stricter requirements, prefer enterprise/private deployment patterns described in `MONETIZATION.md`.
+kfix sends Kubernetes diagnostic context to the Anthropic API to generate analysis. Do not include secrets in pod metadata or logs before running a diagnosis. API keys are stored locally at `~/.kfix/config.yaml` with restrictive file permissions.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/ilyaselhallaoui/kfix/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/ilyaselhallaoui/kfix/discussions)
-
-## Acknowledgments
-
-- Built with [Anthropic Claude](https://www.anthropic.com/) for AI analysis
-- Uses [Typer](https://typer.tiangolo.com/) for CLI interface
-- Terminal UI with [Rich](https://rich.readthedocs.io/)
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-**Made with ❤️ for DevOps engineers who are tired of debugging Kubernetes manually**
+**Built for on-call engineers who need speed and clarity, not more noise.**

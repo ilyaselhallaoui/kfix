@@ -25,8 +25,8 @@ class TestDiagnostician:
 
         # Verify the API was called with correct parameters
         call_args = mock_anthropic_response.call_args
-        assert call_args.kwargs["model"] == "claude-sonnet-4-5-20250929"
-        assert call_args.kwargs["max_tokens"] == 1024
+        assert call_args.kwargs["model"] == "claude-sonnet-4-6"
+        assert call_args.kwargs["max_tokens"] == 1500
         assert "test-pod" in call_args.kwargs["messages"][0]["content"]
 
     def test_diagnose_node(self, mock_anthropic_response, sample_node_diagnostics):

@@ -1,9 +1,11 @@
 """Configuration management for kfix."""
 
+import json
 import os
 from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -19,10 +21,13 @@ class Config:
         config_file: Path to the configuration file (~/.kfix/config.yaml).
     """
 
+    _HISTORY_MAX = 100
+
     def __init__(self) -> None:
         """Initialize configuration manager and ensure config directory exists."""
         self.config_dir = Path.home() / ".kfix"
         self.config_file = self.config_dir / "config.yaml"
+        self.history_file = self.config_dir / "history.jsonl"
         self._ensure_config_dir()
 
     def _ensure_config_dir(self) -> None:
@@ -134,3 +139,75 @@ class Config:
 
         config[key] = value
         self._write_config(config)
+
+    def save_to_history(
+        self,
+        resource_type: str,
+        resource_name: str,
+        namespace: Optional[str],
+        diagnosis: str,
+        model: str,
+    ) -> None:
+        """Append a diagnosis entry to history.
+
+        Keeps the last _HISTORY_MAX entries. Each entry is a JSON line.
+
+        Args:
+            resource_type: Type of resource (pod, node, deployment, service).
+            resource_name: Name of the resource.
+            namespace: Kubernetes namespace, or None for cluster-scoped.
+            diagnosis: AI diagnosis text.
+            model: Model name used.
+        """
+        entry: Dict[str, Any] = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "resource_type": resource_type,
+            "resource_name": resource_name,
+            "namespace": namespace,
+            "diagnosis": diagnosis,
+            "model": model,
+        }
+
+        # Read existing lines
+        lines: List[str] = []
+        if self.history_file.exists():
+            with open(self.history_file, encoding="utf-8") as f:
+                lines = [ln for ln in f.read().splitlines() if ln.strip()]
+
+        lines.append(json.dumps(entry))
+
+        # Trim to max
+        if len(lines) > self._HISTORY_MAX:
+            lines = lines[-self._HISTORY_MAX :]
+
+        with open(self.history_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def get_history(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return the most recent diagnosis history entries.
+
+        Args:
+            limit: Maximum number of entries to return.
+
+        Returns:
+            List of history entry dicts, newest first.
+        """
+        if not self.history_file.exists():
+            return []
+
+        with open(self.history_file, encoding="utf-8") as f:
+            lines = [ln for ln in f.read().splitlines() if ln.strip()]
+
+        entries: List[Dict[str, Any]] = []
+        for line in lines:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+        return list(reversed(entries[-limit:]))
+
+    def clear_history(self) -> None:
+        """Delete all diagnosis history."""
+        if self.history_file.exists():
+            self.history_file.unlink()

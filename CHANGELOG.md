@@ -7,13 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- Corrected cluster accessibility checks to fail on non-zero `kubectl cluster-info` exit codes
-- Added safer auto-fix controls with explicit policy handling
-- Hardened local config storage permissions for API keys
+## [0.3.0] - 2026-02-18
 
 ### Added
-- Service health checks in `kfix scan` (detect services with no ready endpoints)
+- **`kfix watch`**: Continuous cluster monitoring — polls on a configurable interval, highlights new issues with suggested diagnose commands, press Ctrl+C to stop
+- **`kfix history`**: Lists recent AI diagnoses in a table; diagnoses are now auto-saved after every `kfix diagnose` run
+- **`kfix history clear`**: Delete all saved diagnosis history
+- **Interactive API key setup**: First run now guides users through getting and saving an Anthropic API key instead of showing a bare error
+- **Diagnosis history persistence**: Every `kfix diagnose` run saves a record to `~/.kfix/history.jsonl` (last 100 entries)
+
+### Changed
+- Updated default model to `claude-sonnet-4-6` (latest Sonnet)
+- Increased AI `max_tokens` from 1024 → 1500 to prevent truncated responses
+- Scan table Name column no longer truncates long service/resource names
+- AI prompts now enforce consistent section formatting (no more nested header boxes in output)
+
+### Fixed
+- Inconsistent rendering in `kfix scan`: some diagnoses showed nested `┏━━━┓` header boxes inside the outer panel — fixed by constraining AI output format
+- Non-interactive environments (pipes, CI) now get a clear error instead of hanging on API key prompt
 
 ## [0.2.0] - 2026-02-17
 
