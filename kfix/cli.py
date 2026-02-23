@@ -1,6 +1,7 @@
 """CLI interface for kfix."""
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -445,6 +446,34 @@ def _check_cluster(kubectl: Kubectl) -> None:
         raise typer.Exit(1)
 
 
+@config_app.command("show")
+def config_show() -> None:
+    """Show current kfix configuration.
+
+    Example:
+        $ kfix config show
+    """
+    config = Config()
+    api_key = config.get_api_key()
+
+    table = Table(title="kfix Configuration", border_style="cyan")
+    table.add_column("Key", style="cyan", no_wrap=True)
+    table.add_column("Value", style="bold")
+    table.add_column("Source", style="dim")
+
+    if api_key:
+        source = "env" if os.environ.get("ANTHROPIC_API_KEY") else "~/.kfix/config.yaml"
+        masked = api_key[:12] + "..." + api_key[-4:] if len(api_key) > 16 else "***"
+        table.add_row("api-key", masked, source)
+    else:
+        table.add_row("api-key", "[dim]not set[/dim]", "—")
+
+    console.print()
+    console.print(table)
+    if not api_key:
+        console.print("\nSet it with: [cyan]kfix config set api-key YOUR_KEY[/cyan]")
+
+
 @config_app.command("set")
 def config_set(
     key: str = typer.Argument(..., help="Configuration key (e.g., api-key)"),
@@ -608,6 +637,42 @@ def diagnose_service(
     )
 
 
+@diagnose_app.command("pvc")
+def diagnose_pvc(
+    pvc_name: str = typer.Argument(..., help="Name of the PersistentVolumeClaim to diagnose"),
+    namespace: str = typer.Option("default", "-n", "--namespace", help="Kubernetes namespace"),
+    context: Optional[str] = typer.Option(None, "--context", help="Kubernetes context to use"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Disable kubectl result caching"),
+    output_format: str = typer.Option("rich", "-o", "--output", help="Output format (rich or json)"),
+    model: str = typer.Option(
+        "sonnet", "--model", help="Claude model to use (sonnet, opus, haiku)"
+    ),
+    auto_fix: bool = typer.Option(False, "--auto-fix", help="Automatically apply suggested fixes"),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation prompts for fixes"),
+    auto_fix_policy: str = typer.Option(
+        "review",
+        "--auto-fix-policy",
+        help="Auto-fix safety policy: off, review, safe",
+    ),
+) -> None:
+    """Diagnose a PersistentVolumeClaim issue."""
+    kubectl = Kubectl(use_cache=not no_cache, context=context)
+    diagnostician = get_diagnostician(model=model)
+    _check_cluster(kubectl)
+    _diagnose_resource(
+        resource_type="pvc",
+        resource_name=pvc_name,
+        namespace=namespace,
+        gather_fn=lambda: kubectl.gather_pvc_diagnostics(pvc_name, namespace),
+        diagnose_fn=diagnostician.diagnose_pvc,
+        diagnostician=diagnostician,
+        output_format=output_format,
+        auto_fix=auto_fix,
+        yes=yes,
+        auto_fix_policy=auto_fix_policy,
+    )
+
+
 @app.command("scan")
 def scan(
     namespace: Optional[str] = typer.Option(
@@ -672,12 +737,14 @@ def scan(
         "node": kubectl.gather_node_diagnostics,
         "deployment": kubectl.gather_deployment_diagnostics,
         "service": kubectl.gather_service_diagnostics,
+        "pvc": kubectl.gather_pvc_diagnostics,
     }
     diagnose_map: Dict[str, Callable[..., Any]] = {
         "pod": diagnostician.diagnose_pod,
         "node": diagnostician.diagnose_node,
         "deployment": diagnostician.diagnose_deployment,
         "service": diagnostician.diagnose_service,
+        "pvc": diagnostician.diagnose_pvc,
     }
 
     results: List[Dict[str, Any]] = []

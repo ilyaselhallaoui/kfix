@@ -422,3 +422,85 @@ class TestScanNamespace:
         """Test extracting failure reason when status is unknown."""
         pod = {"status": {}}
         assert Kubectl._pod_failure_reason(pod) == "Unknown"
+
+    def test_describe_pvc_success(self, mock_subprocess_success):
+        """Test describing a PVC successfully."""
+        kubectl = Kubectl()
+        result = kubectl.describe_pvc("my-pvc", "default")
+        assert result == "Success output"
+
+    def test_describe_pvc_failure(self, mock_subprocess_failure):
+        """Test describing a non-existent PVC raises KubectlError."""
+        kubectl = Kubectl()
+        with pytest.raises(KubectlError):
+            kubectl.describe_pvc("missing-pvc", "default")
+
+    def test_get_pvc_events_success(self, mock_subprocess_success):
+        """Test getting PVC events."""
+        kubectl = Kubectl()
+        events = kubectl.get_pvc_events("my-pvc", "default")
+        assert events == "Success output"
+
+    def test_get_pvc_events_failure(self, mocker):
+        """Test that PVC events failure returns empty string."""
+        mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("kubectl", 30))
+        kubectl = Kubectl()
+        assert kubectl.get_pvc_events("my-pvc", "default") == ""
+
+    def test_gather_pvc_diagnostics(self, mock_subprocess_success):
+        """Test gathering PVC diagnostics returns expected keys."""
+        kubectl = Kubectl()
+        # get_pv_for_pvc requires JSON output; mock its subprocess
+        result = kubectl.gather_pvc_diagnostics("my-pvc", "default")
+        assert "describe" in result
+        assert "events" in result
+        assert "pv" in result
+
+    def test_scan_pvcs_pending(self, mocker):
+        """Test _scan_pvcs detects a Pending PVC."""
+        pvc_json = json.dumps({
+            "items": [
+                {
+                    "metadata": {"name": "data-pvc"},
+                    "spec": {"storageClassName": "standard"},
+                    "status": {"phase": "Pending"},
+                }
+            ]
+        })
+
+        mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
+        mock_result.stdout = pvc_json
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        kubectl = Kubectl(use_cache=False)
+        results = kubectl._scan_pvcs("default")
+
+        assert len(results) == 1
+        assert results[0]["kind"] == "pvc"
+        assert results[0]["name"] == "data-pvc"
+        assert results[0]["status"] == "Pending"
+        assert "standard" in results[0]["reason"]
+
+    def test_scan_pvcs_all_bound(self, mocker):
+        """Test _scan_pvcs returns empty when all PVCs are Bound."""
+        pvc_json = json.dumps({
+            "items": [
+                {
+                    "metadata": {"name": "data-pvc"},
+                    "spec": {"storageClassName": "standard"},
+                    "status": {"phase": "Bound"},
+                }
+            ]
+        })
+
+        mock_result = Mock()
+        mock_result.returncode = 0
+        mock_result.stderr = ""
+        mock_result.stdout = pvc_json
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        kubectl = Kubectl(use_cache=False)
+        results = kubectl._scan_pvcs("default")
+        assert results == []

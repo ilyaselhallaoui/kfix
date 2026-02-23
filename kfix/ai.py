@@ -130,6 +130,17 @@ SERVICE DESCRIPTION:
 SERVICE ENDPOINTS:
 {endpoints}
 {formatting_rules}""",
+        "pvc": """You are a Kubernetes expert. Analyze the following diagnostics for PersistentVolumeClaim '{resource_name}' and provide a concise diagnosis. Focus on storage class misconfiguration, missing PersistentVolumes, provisioner issues, and access mode conflicts.
+
+PVC DESCRIPTION:
+{describe}
+
+BOUND PERSISTENTVOLUME:
+{pv}
+
+EVENTS:
+{events}
+{formatting_rules}""",
     }
 
     def __init__(self, api_key: str, model: str = "sonnet") -> None:
@@ -395,6 +406,32 @@ SERVICE ENDPOINTS:
             key: diagnostics.get(key, "N/A") for key in ["describe", "endpoints"]
         }
         return self._diagnose("service", service_name, diagnostics_with_defaults, stream=stream)
+
+    def diagnose_pvc(
+        self, pvc_name: str, diagnostics: Dict[str, str], stream: bool = False
+    ) -> Union[str, Iterator[str]]:
+        """Diagnose PVC issues using AI analysis.
+
+        Analyzes PVC diagnostics including description, bound PV details,
+        and events to identify storage provisioning and binding issues.
+
+        Args:
+            pvc_name: Name of the PVC being diagnosed.
+            diagnostics: Dictionary containing diagnostic data with keys:
+                'describe', 'pv', 'events'.
+            stream: If True, return an iterator that yields text chunks as they arrive.
+
+        Returns:
+            If stream=False: Markdown-formatted diagnosis string.
+            If stream=True: Iterator yielding text chunks as they arrive.
+
+        Raises:
+            Exception: If the AI API call fails.
+        """
+        diagnostics_with_defaults = {
+            key: diagnostics.get(key, "N/A") for key in ["describe", "pv", "events"]
+        }
+        return self._diagnose("pvc", pvc_name, diagnostics_with_defaults, stream=stream)
 
     def explain_error(self, error: str) -> str:
         """Explain a Kubernetes error in plain English.

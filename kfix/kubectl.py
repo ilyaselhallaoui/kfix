@@ -438,6 +438,95 @@ class Kubectl:
             "endpoints": self.get_service_endpoints(service_name, namespace),
         }
 
+    def describe_pvc(self, pvc_name: str, namespace: str = "default") -> str:
+        """Get detailed description of a PersistentVolumeClaim.
+
+        Args:
+            pvc_name: Name of the PVC.
+            namespace: Kubernetes namespace. Defaults to "default".
+
+        Returns:
+            Detailed PVC description as a string.
+
+        Raises:
+            KubectlError: If the PVC doesn't exist or kubectl fails.
+        """
+        stdout, _, _ = self._run(["describe", "pvc", pvc_name, "-n", namespace])
+        return stdout
+
+    def get_pvc_events(self, pvc_name: str, namespace: str = "default") -> str:
+        """Get events related to a PVC.
+
+        Args:
+            pvc_name: Name of the PVC.
+            namespace: Kubernetes namespace. Defaults to "default".
+
+        Returns:
+            Events as a string, or empty string if no events found.
+        """
+        try:
+            stdout, _, _ = self._run(
+                [
+                    "get",
+                    "events",
+                    "-n",
+                    namespace,
+                    "--field-selector",
+                    f"involvedObject.name={pvc_name}",
+                    "--sort-by",
+                    ".lastTimestamp",
+                ],
+                check=False,
+            )
+            return stdout
+        except KubectlError:
+            return ""
+
+    def get_pv_for_pvc(self, pvc_name: str, namespace: str = "default") -> str:
+        """Get the PersistentVolume bound to a PVC.
+
+        Args:
+            pvc_name: Name of the PVC.
+            namespace: Kubernetes namespace. Defaults to "default".
+
+        Returns:
+            PV description as a string, or empty string if unavailable.
+        """
+        try:
+            stdout, _, _ = self._run(
+                ["get", "pvc", pvc_name, "-n", namespace, "-o", "json"], check=False
+            )
+            if not stdout.strip():
+                return ""
+            data = _json.loads(stdout)
+            pv_name = data.get("spec", {}).get("volumeName", "")
+            if not pv_name:
+                return ""
+            pv_stdout, _, _ = self._run(["describe", "pv", pv_name], check=False)
+            return pv_stdout
+        except (KubectlError, _json.JSONDecodeError):
+            return ""
+
+    def gather_pvc_diagnostics(self, pvc_name: str, namespace: str = "default") -> Dict[str, str]:
+        """Gather all diagnostic information for a PVC.
+
+        Args:
+            pvc_name: Name of the PVC.
+            namespace: Kubernetes namespace. Defaults to "default".
+
+        Returns:
+            Dictionary containing PVC diagnostics with keys:
+            'describe', 'events', 'pv'.
+
+        Raises:
+            KubectlError: If critical kubectl commands fail.
+        """
+        return {
+            "describe": self.describe_pvc(pvc_name, namespace),
+            "events": self.get_pvc_events(pvc_name, namespace),
+            "pv": self.get_pv_for_pvc(pvc_name, namespace),
+        }
+
     def scan_namespace(self, namespace: str = "default") -> List[Dict[str, str]]:
         """Scan a namespace for unhealthy resources.
 
@@ -497,6 +586,9 @@ class Kubectl:
         # Scan services
         unhealthy.extend(self._scan_services(namespace))
 
+        # Scan PVCs
+        unhealthy.extend(self._scan_pvcs(namespace))
+
         # Scan nodes once (cluster-scoped).
         unhealthy.extend(self._scan_nodes())
 
@@ -546,6 +638,7 @@ class Kubectl:
                 pass
 
             unhealthy.extend(self._scan_services(ns))
+            unhealthy.extend(self._scan_pvcs(ns))
 
             try:
                 stdout, _, _ = self._run(
@@ -644,6 +737,40 @@ class Kubectl:
         except (KubectlError, _json.JSONDecodeError):
             pass
 
+        return unhealthy
+
+    def _scan_pvcs(self, namespace: str) -> List[Dict[str, str]]:
+        """Scan PVCs for non-Bound status.
+
+        Args:
+            namespace: Kubernetes namespace to scan.
+
+        Returns:
+            List of unhealthy PVC dicts.
+        """
+        unhealthy: List[Dict[str, str]] = []
+        try:
+            stdout, _, _ = self._run(
+                ["get", "pvc", "-n", namespace, "-o", "json"], check=False
+            )
+            if not stdout.strip():
+                return unhealthy
+            data = _json.loads(stdout)
+            for item in data.get("items", []):
+                phase = item.get("status", {}).get("phase", "Unknown")
+                if phase != "Bound":
+                    name = item.get("metadata", {}).get("name", "unknown")
+                    storage_class = item.get("spec", {}).get("storageClassName", "")
+                    reason = f"StorageClass: {storage_class}" if storage_class else phase
+                    unhealthy.append({
+                        "kind": "pvc",
+                        "name": name,
+                        "namespace": namespace,
+                        "status": phase,
+                        "reason": reason,
+                    })
+        except (KubectlError, _json.JSONDecodeError):
+            pass
         return unhealthy
 
     def _scan_nodes(self) -> List[Dict[str, str]]:

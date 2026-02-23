@@ -388,6 +388,89 @@ kubectl get pods -n production
         assert commands == []
 
 
+class TestDiagnosePvc:
+    """Tests for kfix diagnose pvc command."""
+
+    def test_diagnose_pvc_help(self):
+        """Test that diagnose pvc help is available."""
+        result = runner.invoke(app, ["diagnose", "pvc", "--help"])
+        assert result.exit_code == 0
+        assert "pvc" in result.stdout.lower() or "PersistentVolumeClaim" in result.stdout
+
+    def test_diagnose_pvc_no_api_key(self, tmp_path, monkeypatch):
+        """Test diagnosing PVC without API key configured."""
+        from pathlib import Path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        result = runner.invoke(app, ["diagnose", "pvc", "my-pvc"])
+        assert result.exit_code == 1
+        assert "No API key configured" in result.stdout
+
+    def test_diagnose_pvc_no_cluster(self, tmp_path, monkeypatch, mocker):
+        """Test diagnosing PVC without cluster access."""
+        from pathlib import Path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+        mocker.patch("kfix.kubectl.Kubectl.check_cluster_access", return_value=False)
+
+        result = runner.invoke(app, ["diagnose", "pvc", "my-pvc"])
+        assert result.exit_code == 1
+        assert "Cannot access Kubernetes cluster" in result.stdout
+
+    def test_diagnose_pvc_success(self, tmp_path, monkeypatch, mocker):
+        """Test successful PVC diagnosis."""
+        from pathlib import Path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        mocker.patch("kfix.kubectl.Kubectl.check_cluster_access", return_value=True)
+        mocker.patch(
+            "kfix.kubectl.Kubectl.gather_pvc_diagnostics",
+            return_value={
+                "describe": "Name: my-pvc\nStatus: Pending",
+                "events": "FailedBinding: no PV available",
+                "pv": "",
+            },
+        )
+        mocker.patch("kfix.ai.Diagnostician.diagnose_pvc", return_value="PVC diagnosis result")
+
+        result = runner.invoke(app, ["diagnose", "pvc", "my-pvc", "-n", "default"])
+        assert result.exit_code == 0
+        assert "PVC diagnosis result" in result.stdout
+
+
+class TestConfigShow:
+    """Tests for kfix config show command."""
+
+    def test_config_show_no_key(self, tmp_path, monkeypatch):
+        """Test config show when no API key is set."""
+        from pathlib import Path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        result = runner.invoke(app, ["config", "show"])
+        assert result.exit_code == 0
+        assert "not set" in result.stdout
+
+    def test_config_show_with_key(self, tmp_path, monkeypatch):
+        """Test config show displays masked key when configured."""
+        from pathlib import Path
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-testkey1234")
+
+        result = runner.invoke(app, ["config", "show"])
+        assert result.exit_code == 0
+        assert "api-key" in result.stdout
+        # Key should be masked, not shown in full
+        assert "sk-ant-api03-testkey1234" not in result.stdout
+
+
 class TestAutoFixPolicy:
     """Tests for auto-fix safety policy handling."""
 

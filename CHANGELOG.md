@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`kfix diagnose pvc`**: Diagnose PersistentVolumeClaim issues — storage class mismatches, unbound volumes, provisioner failures, access mode conflicts
+- **PVC scanning**: `kfix scan` now detects non-Bound PVCs (`Pending`, `Lost`) alongside pods, deployments, services, and nodes
+- **`kfix config show`**: Display current configuration with masked API key and source (env var vs config file)
+
 ## [0.3.0] - 2026-02-18
 
 ### Added

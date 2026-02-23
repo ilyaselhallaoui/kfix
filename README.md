@@ -55,6 +55,7 @@ kfix diagnose pod <name>        [-n ns] [--context ctx] [--model haiku|sonnet|op
 kfix diagnose node <name>               [--context ctx]
 kfix diagnose deployment <name> [-n ns] [--context ctx]
 kfix diagnose service <name>    [-n ns] [--context ctx]
+kfix diagnose pvc <name>        [-n ns] [--context ctx]
 
 # Auto-apply safe fixes without prompting
 kfix diagnose pod my-app -n prod --auto-fix --auto-fix-policy safe
@@ -102,10 +103,11 @@ kfix explain "ImagePullBackOff"
 kfix explain "OOMKilled: container exceeded memory limit"
 ```
 
-### `kfix config set`
+### `kfix config`
 
 ```bash
-kfix config set api-key sk-ant-api03-...
+kfix config show                          # Show current configuration
+kfix config set api-key sk-ant-api03-...  # Set API key
 ```
 
 Or set the environment variable: `export ANTHROPIC_API_KEY=sk-ant-...`
@@ -163,9 +165,9 @@ make all              # format + lint + type-check + test
 - [x] Multi-cluster support (`--context`)
 - [x] Continuous watch (`kfix watch`)
 - [x] Diagnosis history (`kfix history`)
-- [ ] PVC / storage diagnosis
+- [x] PVC / storage diagnosis (`kfix diagnose pvc`, PVCs in `kfix scan`)
 - [ ] Network connectivity diagnosis
-- [ ] `kfix watch` desktop/Slack notifications
+- [ ] `kfix watch` Slack notifications
 
 ## Data & Privacy
 
