@@ -11,6 +11,9 @@
 
 kfix is a command-line tool that uses AI to diagnose and fix Kubernetes issues instantly. Instead of manually running `kubectl describe`, digging through logs, and searching Stack Overflow, kfix does all of that and returns an actionable fix in under 10 seconds.
 
+<!-- Demo: replace this comment with an asciinema/GIF of `kfix diagnose pod` -->
+<!-- ![kfix demo](docs/demo.gif) -->
+
 - **Instant diagnosis** of pods, nodes, deployments, and services
 - **AI-powered analysis** using Anthropic Claude
 - **Copy-paste ready** kubectl fix commands
@@ -147,6 +150,20 @@ kubectl logs my-app             # Dig through logs
 kfix diagnose pod my-app
 # ✅ Root cause + copy-paste fix in 10 seconds
 ```
+
+## kfix vs k8sgpt
+
+[k8sgpt](https://k8sgpt.ai) is the closest neighbour in this space and a great project. They solve overlapping problems but make different trade-offs:
+
+| | kfix | k8sgpt |
+|---|---|---|
+| Shape | Single-binary CLI | CLI + in-cluster operator + CRDs |
+| Setup | `pip install kfix` and an API key | CLI install, or operator + CRDs in-cluster |
+| Output | Streaming Markdown with copy-paste `kubectl` fixes | Structured analysis, multiple output formats |
+| Auto-fix | Built-in with `safe`/`review`/`off` policy | Out of scope |
+| LLM backends | Anthropic Claude (today) | Many (OpenAI, Anthropic, Azure, local, ...) |
+
+If you want a continuously-running operator that emits findings into your cluster: use k8sgpt. If you want a fast, local CLI that turns a pager into a fix in one command: use kfix.
 
 ## Development
 

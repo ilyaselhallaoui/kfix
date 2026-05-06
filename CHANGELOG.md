@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PVC scanning**: `kfix scan` now detects non-Bound PVCs (`Pending`, `Lost`) alongside pods, deployments, services, and nodes
 - **`kfix config show`**: Display current configuration with masked API key and source (env var vs config file)
 
+### Fixed
+- `--model opus` now uses the correct model id `claude-opus-4-7` (was `claude-opus-4-6`, which 404s)
+
+### Removed
+- `MONETIZATION.md` and the local `kfix.sh` venv wrapper (not relevant to the OSS distribution)
+
 ## [0.3.0] - 2026-02-18
 
 ### Added
