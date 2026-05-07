@@ -1,3 +1,5 @@
+> **Note:** kfix was a vibe-coded experiment and is no longer actively maintained. Feel free to fork it or use it as-is.
+
 # kfix
 
 **AI-powered Kubernetes troubleshooter CLI** — From `kubectl` noise to a clear fix in seconds.
